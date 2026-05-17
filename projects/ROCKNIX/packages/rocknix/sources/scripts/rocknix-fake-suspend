@@ -82,41 +82,42 @@ backlight_on() {
 }
 
 display_off() {
-  if [[ "${ENABLE_DPMS}" == "1" ]]; then
-    # DPMS enabled, use it to turn off the display
-    ${DEBUG} && log $0 "DPMS - display off"
+  local dpms_success=false
 
-    if [[ -n $(echo "${UI_SERVICE}" | grep "sway") && -n $(pgrep "sway") ]]; then
-      ${DEBUG} && log $0 "Display power off"
-      swaymsg "output * power off"
-    elif [[ -n $(echo "${UI_SERVICE}" | grep "weston") && -n $(pgrep "weston") ]]; then
-      weston-dpms -m off
-    else
-      # Fallback - just turn off the backlight
-      backlight_off
+  if [[ "${ENABLE_DPMS}" == "1" ]]; then
+    ${DEBUG} && log $0 "DPMS - display off"
+    if echo "${UI_SERVICE}" | grep -q "sway"; then
+      swaymsg "output * power off" 2>/dev/null && dpms_success=true
+    elif echo "${UI_SERVICE}" | grep -q "weston"; then
+      weston-dpms -m off 2>/dev/null && dpms_success=true
     fi
-  else
-    # DPMS disabled, just turn off the backlight
-    backlight_off
+  fi
+
+  if [[ "${dpms_success}" != "true" ]]; then
+    ${DEBUG} && log $0 "Backlight off"
+    for BL_POWER_DEVICE in "${BL_POWER_DEVICES[@]}"; do
+      echo 4 > "${BL_POWER_DEVICE}"
+    done
   fi
 }
 
 display_on() {
-  if [[ "${ENABLE_DPMS}" == "1" ]]; then
-    # DPMS enabled, use it to turn on the display
-    ${DEBUG} && log $0 "DPMS - display on"
+  local dpms_success=false
 
-    if [[  -n $(echo "${UI_SERVICE}" | grep "sway") && -n $(pgrep "sway") ]]; then
-      ${DEBUG} && log $0 "Display power on"
-      swaymsg "output * power on"
-    elif [[ -n $(echo "${UI_SERVICE}" | grep "weston") && -n $(pgrep "weston") ]]; then
-      weston-dpms -m on
-    else
-      backlight_on
+  if [[ "${ENABLE_DPMS}" == "1" ]]; then
+    ${DEBUG} && log $0 "DPMS - display on"
+    if echo "${UI_SERVICE}" | grep -q "sway"; then
+      swaymsg "output * power on" 2>/dev/null && dpms_success=true
+    elif echo "${UI_SERVICE}" | grep -q "weston"; then
+      weston-dpms -m on 2>/dev/null && dpms_success=true
     fi
-  else
-    # Fallback - just turn on the backlight
-    backlight_on
+  fi
+
+  if [[ "${dpms_success}" != "true" ]]; then
+    ${DEBUG} && log $0 "Backlight on"
+    for BL_POWER_DEVICE in "${BL_POWER_DEVICES[@]}"; do
+      echo 0 > "${BL_POWER_DEVICE}"
+    done
   fi
 }
 
@@ -255,6 +256,8 @@ do_suspend_actions() {
 
 do_resume_actions() {
   [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+
+  # Restore CPU / GPU governors (from temporary performance mode)
   restore_governors
   unfreeze_processes
   display_on
@@ -341,6 +344,10 @@ suspend() {
 }
 
 resume() {
+  # Set performance governor immediately so resume runs at full speed
+  set_cpu_gov performance
+  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+
   # Resume event - remove all flag files and kill processes
   ${DEBUG} && log $0 "Removing flags"
   rm -f "${DELAY_FLAG_FILE_PATTERN}".*
