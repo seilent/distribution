@@ -39,5 +39,6 @@ then
   VOLUME=50
 fi
 
+pactl set-sink-mute @DEFAULT_SINK@ false
 pactl -- set-sink-volume @DEFAULT_SINK@ ${VOLUME}%
 set_setting "audio.volume" ${VOLUME}
