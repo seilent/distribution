@@ -113,6 +113,11 @@ install_steam_client_arm64
 install_bundled_proton_files
 run_steam_first_launch
 
+# Install LSFG-VK layer into FEX RootFS and Proton dirs (idempotent; safe if missing)
+if [ -x /usr/bin/lsfg-vk-setup ]; then
+  /usr/bin/lsfg-vk-setup
+fi
+
 echo ""
 echo "Steam installed successfully. You can now start it from EmulationStation from Steam section"
 sleep 10

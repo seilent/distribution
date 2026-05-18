@@ -1,0 +1,40 @@
+#!/bin/bash
+# LSFG Frame Generation wrapper for Steam launch options
+# Usage: Set Steam launch options to 'lsfg %command%'
+
+LSFG_DIR="/storage/.config/lsfg-vk"
+APPID="${SteamAppId:-${SteamGameId:-unknown}}"
+CONF="${LSFG_DIR}/games/${APPID}.json"
+DEFAULT_CONF="${LSFG_DIR}/default.json"
+DLL_PATH="/storage/games-internal/roms/steam/steamapps/common/Lossless Scaling/Lossless.dll"
+
+if [ -f "$CONF" ]; then
+    SRC="$CONF"
+elif [ -f "$DEFAULT_CONF" ]; then
+    SRC="$DEFAULT_CONF"
+else
+    SRC=""
+fi
+
+if [ -n "$SRC" ]; then
+    MULTIPLIER=$(jq -r ".multiplier // 0" "$SRC")
+    FPS_LIMIT=$(jq -r ".fps_limit // 30" "$SRC")
+    FLOW_SCALE=$(jq -r ".flow_scale // 0.3" "$SRC")
+    PERF_MODE=$(jq -r ".performance_mode // 1" "$SRC")
+else
+    MULTIPLIER=0
+fi
+
+if [ "$MULTIPLIER" = "0" ] || [ "$MULTIPLIER" = "null" ]; then
+    exec "$@"
+fi
+
+export LSFG_ENABLE=1
+export LSFG_LEGACY=1
+export LSFG_DLL_PATH="${DLL_PATH}"
+export LSFG_DLL_PATH_UNIX="${DLL_PATH}"
+export LSFG_MULTIPLIER="${MULTIPLIER}"
+export LSFG_FLOW_SCALE="${FLOW_SCALE}"
+export LSFG_PERFORMANCE_MODE="${PERF_MODE}"
+export DXVK_FRAME_RATE="${FPS_LIMIT}"
+exec "$@"

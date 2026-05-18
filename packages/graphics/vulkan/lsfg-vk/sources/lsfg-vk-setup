@@ -1,0 +1,76 @@
+#!/bin/bash
+# lsfg-vk-setup: install LSFG layer files into FEX RootFS and Proton install directories
+#
+# Sources:
+#   /usr/share/lsfg-vk/liblsfg-vk.so
+#   /usr/share/lsfg-vk/VkLayer_LS_frame_generation.json
+#   /usr/share/lsfg-vk/user_settings.py
+#
+# Targets (all under /storage/, may not exist yet):
+#   FEX RootFS:
+#     /storage/.local/share/fex-emu/RootFS/ArchLinux/usr/lib/liblsfg-vk.so
+#     /storage/.local/share/fex-emu/RootFS/ArchLinux/usr/share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation.x86_64.json
+#   Per Proton install in compatibilitytools.d/ (excluding ARM64 Proton):
+#     <PROTON_DIR>/user_settings.py
+
+set -u
+
+SRC_DIR="/usr/share/lsfg-vk"
+SRC_SO="${SRC_DIR}/liblsfg-vk.so"
+SRC_JSON="${SRC_DIR}/VkLayer_LS_frame_generation.json"
+SRC_USER_SETTINGS="${SRC_DIR}/user_settings.py"
+
+FEX_ROOTFS="/storage/.local/share/fex-emu/RootFS/ArchLinux"
+COMPAT_DIR="/storage/games-internal/roms/steam/compatibilitytools.d"
+
+log() { echo "lsfg-vk-setup: $*"; }
+
+# Copy source -> dest only if missing or content differs
+install_if_changed() {
+    local src="$1"
+    local dst="$2"
+    if [ ! -f "$src" ]; then
+        log "missing source: $src"
+        return 1
+    fi
+    if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+        return 0
+    fi
+    install -D -m 0644 "$src" "$dst" && log "installed $dst"
+}
+
+setup_fex_rootfs() {
+    if [ ! -d "$FEX_ROOTFS" ]; then
+        log "FEX RootFS not present at $FEX_ROOTFS; skipping"
+        return 0
+    fi
+    install_if_changed "$SRC_SO" "${FEX_ROOTFS}/usr/lib/liblsfg-vk.so"
+    install_if_changed "$SRC_JSON" "${FEX_ROOTFS}/usr/share/vulkan/implicit_layer.d/VkLayer_LS_frame_generation.x86_64.json"
+}
+
+setup_proton_user_settings() {
+    if [ ! -d "$COMPAT_DIR" ]; then
+        log "compatibilitytools.d not present; skipping Proton hook"
+        return 0
+    fi
+    local proton_dir
+    for proton_dir in "$COMPAT_DIR"/*/; do
+        [ -d "$proton_dir" ] || continue
+        local name="${proton_dir%/}"
+        name="${name##*/}"
+        # Skip ARM64-native Proton (uses aarch64 Vulkan, x86_64 layer wouldn't apply)
+        case "$name" in
+            *ARM64*|*arm64*) log "skipping native ARM64 Proton: $name"; continue ;;
+        esac
+        # Only install where 'proton' python script exists (sanity check)
+        [ -f "${proton_dir}proton" ] || continue
+        install_if_changed "$SRC_USER_SETTINGS" "${proton_dir}user_settings.py"
+    done
+}
+
+main() {
+    setup_fex_rootfs
+    setup_proton_user_settings
+}
+
+main "$@"

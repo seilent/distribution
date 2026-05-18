@@ -1,0 +1,12 @@
+[Unit]
+Description=Install LSFG-VK layer into FEX RootFS and Proton
+After=local-fs.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/lsfg-vk-setup
+
+[Install]
+WantedBy=multi-user.target
