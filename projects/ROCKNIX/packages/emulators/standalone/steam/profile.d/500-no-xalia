@@ -1,0 +1,3 @@
+#!/bin/sh
+# Disable xalia (Proton accessibility/input helper) - causes high CPU on ARM
+export PROTON_USE_XALIA=0
