@@ -1,0 +1,60 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 ROCKNIX (https://github.com/ROCKNIX)
+#
+# timedatectl shim for Steam Deck mode.
+# Steam calls "sudo -n timedatectl set-timezone <tz>" to persist timezone changes.
+# ROCKNIX removes timedatectl from the systemd build, so this shim bridges
+# Steam's expectation to ROCKNIX's native timezone mechanism.
+
+TIMEZONE_CACHE="/storage/.cache/timezone"
+SYSTEM_CFG="/storage/.config/system/configs/system.cfg"
+
+get_timezone() {
+  if [ -f "${TIMEZONE_CACHE}" ]; then
+    . "${TIMEZONE_CACHE}"
+    echo "${TIMEZONE:-UTC}"
+  else
+    echo "UTC"
+  fi
+}
+
+case "$1" in
+  set-timezone)
+    TZ_NAME="$2"
+    if [ -z "${TZ_NAME}" ]; then
+      echo "timedatectl: missing timezone argument" >&2
+      exit 1
+    fi
+    if [ ! -f "/usr/share/zoneinfo/${TZ_NAME}" ]; then
+      echo "timedatectl: invalid timezone '${TZ_NAME}'" >&2
+      exit 1
+    fi
+    # Write to ROCKNIX timezone cache (used by tz-data.service)
+    echo "TIMEZONE=${TZ_NAME}" > "${TIMEZONE_CACHE}"
+    # Apply immediately
+    ln -sf "/usr/share/zoneinfo/${TZ_NAME}" /var/run/localtime
+    # Update system.cfg if it exists
+    if [ -f "${SYSTEM_CFG}" ]; then
+      sed -i "s|^system.timezone=.*|system.timezone=${TZ_NAME}|" "${SYSTEM_CFG}"
+    fi
+    ;;
+  show|status|"")
+    TZ_CURRENT=$(get_timezone)
+    TZ_ABBR=$(TZ=${TZ_CURRENT} date +%Z 2>/dev/null || echo "UTC")
+    TZ_OFF=$(TZ=${TZ_CURRENT} date +%z 2>/dev/null || echo "+0000")
+    cat << EOF
+               Local time: $(TZ=${TZ_CURRENT} date "+%a %Y-%m-%d %H:%M:%S %Z")
+           Universal time: $(date -u "+%a %Y-%m-%d %H:%M:%S UTC")
+                 RTC time: $(date -u "+%a %Y-%m-%d %H:%M:%S")
+                Time zone: ${TZ_CURRENT} (${TZ_ABBR}, ${TZ_OFF})
+System clock synchronized: yes
+              NTP service: active
+          RTC in local TZ: no
+EOF
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+exit 0
