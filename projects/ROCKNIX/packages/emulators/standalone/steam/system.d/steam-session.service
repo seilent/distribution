@@ -1,0 +1,10 @@
+[Unit]
+Description=Steam Direct Boot Session
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/storage
+ExecStart=/usr/bin/start_steam_direct.sh
+Restart=no
+TimeoutStopSec=10

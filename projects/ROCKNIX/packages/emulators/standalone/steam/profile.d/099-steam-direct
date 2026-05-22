@@ -1,0 +1,8 @@
+#!/bin/sh
+# Override UI_SERVICE to boot directly into Steam when set as boot game
+BOOTGAME_CMD=$(get_setting global.bootgame.cmd 2>/dev/null)
+case "${BOOTGAME_CMD}" in
+  *start_steam*|*Steam*)
+    UI_SERVICE="steam-session.service"
+    ;;
+esac
