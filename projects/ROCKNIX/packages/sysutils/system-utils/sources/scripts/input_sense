@@ -386,7 +386,22 @@ set +e
       ;;
       (${FUNCTION_POWER_PRESSED_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_POWER_PRESSED_EVENT}: Pressed"
-        /usr/bin/rocknix-fake-suspend power &
+        POWER_PRESS_TIME=$(date +%s%N)
+        # Background process: vibrate after 250ms if still holding
+        (usleep 250000; if [ -f /tmp/.power_holding ]; then /usr/bin/rumble; fi) &
+        touch /tmp/.power_holding
+      ;;
+      (${FUNCTION_POWER_RELEASED_EVENT})
+        rm -f /tmp/.power_holding
+        if [ -n "${POWER_PRESS_TIME}" ]; then
+          POWER_RELEASE_TIME=$(date +%s%N)
+          POWER_HOLD_MS=$(( (POWER_RELEASE_TIME - POWER_PRESS_TIME) / 1000000 ))
+          ${DEBUG} && log $0 "Power held for ${POWER_HOLD_MS}ms"
+          if [ ${POWER_HOLD_MS} -ge 250 ]; then
+            /usr/bin/rocknix-fake-suspend power &
+          fi
+          POWER_PRESS_TIME=""
+        fi
       ;;
       (${FUNCTION_LID_CLOSE_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_CLOSE_EVENT}: Close"

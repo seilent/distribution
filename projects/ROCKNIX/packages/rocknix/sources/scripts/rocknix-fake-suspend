@@ -195,40 +195,34 @@ unblock_input() {
 }
 
 do_suspend_actions() {
-  # Disable LEDs
-  disable_leds
+  # Turn off display
+  display_off
 
   # Mute audio
   mute_audio
 
-  # Block input
-  block_input
-  
-  # Turn off display
-  display_off
-
-  # Set CPU / GPU governors
-  powersave_governors
-
   # CPU core parking (if enabled)
   [[ "${ENABLE_CORE_PARKING}" == "1" ]] && park_cores
+
+  # Block input
+  block_input
+
+  # Disable LEDs
+  disable_leds
 }
 
 do_resume_actions() {
-  # Undo CPU core parking (if enabled)
-  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
-
-  # Restore CPU / GPU governors (from temporary performance mode)
-  restore_governors
-
   # Turn on display
   display_on
 
-  # Unblock input
-  unblock_input
-
   # Unmute audio
   unmute_audio
+
+  # Undo CPU core parking (if enabled)
+  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+
+  # Unblock input
+  unblock_input
 
   # Restore LEDs
   enable_leds
