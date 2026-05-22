@@ -1,0 +1,24 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
+# Short haptic feedback via force-feedback capable input device
+
+python3 -c "
+import struct,fcntl,os,time,array,glob,sys
+duration=int(sys.argv[1]) if len(sys.argv)>1 else 80
+for ev in sorted(glob.glob('/dev/input/event*')):
+    try:
+        caps=open(f'/sys/class/input/{os.path.basename(ev)}/device/capabilities/ff').read().strip()
+        if caps!='0':
+            fd=os.open(ev,os.O_RDWR)
+            e=struct.pack('HhHHHHHHHH',0x50,-1,0,0,0,duration,0,0,0xFFFF,0xFFFF).ljust(48,b'\x00')
+            buf=array.array('b',e)
+            fcntl.ioctl(fd,0x40304580,buf)
+            eid=struct.unpack('h',buf[2:4])[0]
+            os.write(fd,struct.pack('llHHi',0,0,0x15,eid,1))
+            time.sleep(duration/1000.0)
+            os.write(fd,struct.pack('llHHi',0,0,0x15,eid,0))
+            os.close(fd)
+            break
+    except: continue
+" "$@" &

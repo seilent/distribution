@@ -245,24 +245,36 @@ unfreeze_processes() {
 }
 
 do_suspend_actions() {
-  disable_leds
-  mute_audio
-  block_input
+  # Turn off display
   display_off
-  freeze_processes
-  powersave_governors
+
+  # Mute audio
+  mute_audio
+
+  # CPU core parking (if enabled)
   [[ "${ENABLE_CORE_PARKING}" == "1" ]] && park_cores
+
+  # Block input
+  block_input
+
+  # Disable LEDs
+  disable_leds
 }
 
 do_resume_actions() {
+  # Turn on display
+  display_on
+
+  # Unmute audio
+  unmute_audio
+
+  # Undo CPU core parking (if enabled)
   [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
 
-  # Restore CPU / GPU governors (from temporary performance mode)
-  restore_governors
-  unfreeze_processes
-  display_on
+  # Unblock input
   unblock_input
-  unmute_audio
+
+  # Restore LEDs
   enable_leds
 }
 
