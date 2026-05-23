@@ -15,3 +15,5 @@ if [ -n "${CUSTOM_FONTS}" ]; then
 else
   PKG_DEPENDS_TARGET+=" liberation-fonts-ttf"
 fi
+
+PKG_DEPENDS_TARGET+=" noto-sans-cjk-jp"
