@@ -1,3 +1,5 @@
 #!/bin/sh
 # Disable xalia (Proton accessibility/input helper) - causes high CPU on ARM
 export PROTON_USE_XALIA=0
+# FEXServer socket must be in /storage/ (shared into pressure-vessel containers)
+export FEX_SERVERSOCKETPATH=/storage/.cache/0.FEXServer.Socket
