@@ -194,6 +194,55 @@ unblock_input() {
   done
 }
 
+freeze_sessions() {
+  ${DEBUG} && log $0 "Freezing gamescope and steam sessions"
+  local GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+  if [[ -n "${GS_PID}" ]]; then
+    local GS_SID=$(ps -o sid= -p ${GS_PID} | tr -d ' ')
+    if [[ -n "${GS_SID}" ]]; then
+      kill -STOP $(ps -o pid= --sid ${GS_SID}) 2>/dev/null
+    fi
+  fi
+  # steamwebhelper runs in its own session
+  local SWH_PIDS=$(pidof steamwebhelper 2>/dev/null)
+  if [[ -n "${SWH_PIDS}" ]]; then
+    kill -STOP ${SWH_PIDS} 2>/dev/null
+  fi
+  # inputplumber not needed during sleep (input_sense handles wake)
+  local IP_PID=$(pidof inputplumber 2>/dev/null)
+  if [[ -n "${IP_PID}" ]]; then
+    kill -STOP ${IP_PID} 2>/dev/null
+  fi
+  # unbind touchscreen to save power
+  echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/unbind 2>/dev/null
+  # disable wifi
+  ip link set wlan0 down 2>/dev/null
+}
+
+thaw_sessions() {
+  ${DEBUG} && log $0 "Thawing gamescope and steam sessions"
+  # re-enable wifi
+  ip link set wlan0 up 2>/dev/null
+  # rebind touchscreen
+  echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/bind 2>/dev/null
+  # resume inputplumber
+  local IP_PID=$(pidof inputplumber 2>/dev/null)
+  if [[ -n "${IP_PID}" ]]; then
+    kill -CONT ${IP_PID} 2>/dev/null
+  fi
+  local GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+  if [[ -n "${GS_PID}" ]]; then
+    local GS_SID=$(ps -o sid= -p ${GS_PID} | tr -d ' ')
+    if [[ -n "${GS_SID}" ]]; then
+      kill -CONT $(ps -o pid= --sid ${GS_SID}) 2>/dev/null
+    fi
+  fi
+  local SWH_PIDS=$(pidof steamwebhelper 2>/dev/null)
+  if [[ -n "${SWH_PIDS}" ]]; then
+    kill -CONT ${SWH_PIDS} 2>/dev/null
+  fi
+}
+
 do_suspend_actions() {
   # Turn off display
   display_off
@@ -209,9 +258,15 @@ do_suspend_actions() {
 
   # Disable LEDs
   disable_leds
+
+  # Freeze gamescope session (stops rendering + game) - after display off
+  freeze_sessions
 }
 
 do_resume_actions() {
+  # Thaw gamescope session first (needs to be running for display_on)
+  thaw_sessions
+
   # Turn on display
   display_on
 
@@ -323,7 +378,8 @@ check_hardware_suspend_enabled
 HW_SUSPEND_ENABLED=$?
 
 if [[ $HW_SUSPEND_ENABLED -eq 0 ]]; then
-  ${DEBUG} && log $0 "Hardware suspend enabled, exiting"
+  ${DEBUG} && log $0 "Hardware suspend enabled, using real suspend"
+  systemd-run --no-block /usr/bin/rocknix-suspend "$@"
   exit 0
 fi
 

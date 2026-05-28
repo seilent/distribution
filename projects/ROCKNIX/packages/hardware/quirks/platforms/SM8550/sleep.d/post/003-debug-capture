@@ -1,0 +1,37 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
+# Capture wake-source forensics on every resume.
+#
+# /sys/power/pm_wakeup_irq is the most reliable record of which IRQ
+# triggered wake from suspend, but it lives in volatile memory and is
+# cleared on subsequent suspends. Snapshot it here, plus the live
+# wakeup_sources state and a tail of dmesg, into /storage so the data
+# survives across reboots (in case a later cold reset wipes DRAM).
+#
+# Disabled by default. Touch /storage/.suspend-debug-enabled to enable.
+
+[ -e /storage/.suspend-debug-enabled ] || exit 0
+
+LOG=/storage/.suspend-debug.log
+{
+  echo "===== resume @ $(date) (uptime $(cut -d. -f1 /proc/uptime)s) ====="
+  echo "boot_id: $(cat /proc/sys/kernel/random/boot_id)"
+  IRQ=$(cat /sys/power/pm_wakeup_irq 2>/dev/null)
+  echo "--- pm_wakeup_irq: ${IRQ:-<empty: non-IRQ wake>} ---"
+  if [ -n "$IRQ" ]; then
+    echo "--- /proc/interrupts entry ---"
+    grep -E "^[ ]*${IRQ}:" /proc/interrupts 2>/dev/null
+  fi
+  echo "--- /sys/kernel/debug/wakeup_sources ---"
+  cat /sys/kernel/debug/wakeup_sources 2>/dev/null
+  echo "--- suspend_stats ---"
+  for f in success fail last_failed_dev last_failed_step last_failed_errno; do
+    printf "%s: %s\n" "$f" "$(cat /sys/power/suspend_stats/$f 2>/dev/null)"
+  done
+  echo "--- dmesg tail ---"
+  dmesg | tail -80
+  echo "===== end ====="
+  echo
+} >> "$LOG" 2>&1
+sync

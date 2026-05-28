@@ -1,0 +1,36 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
+#
+# Disable spurious wakeup sources at boot so the SoC stays in deep sleep
+# during long suspends. Without this, sources like the battery state,
+# USB-C connector events, WiFi MHI traffic, and ADSP can wake the system
+# within minutes of entering suspend.
+#
+# Sources kept enabled: power button (pmic_pwrkey), volume keys
+# (gpio-keys), RTC alarm. Those let user-initiated wake and scheduled
+# wake still work.
+#
+# Some target devices (PCIe xHCI, UCSI USB-C) probe late, so the disable
+# is run in the background and waits up to 60s per path. The autostart
+# dispatcher continues immediately.
+
+(
+  for path in \
+    /sys/class/power_supply/battery/power/wakeup \
+    /sys/class/power_supply/qcom-battmgr-usb/power/wakeup \
+    /sys/class/power_supply/qcom-battmgr-wls/power/wakeup \
+    /sys/class/power_supply/ucsi-source-psy-pmic_glink.ucsi.01/power/wakeup \
+    /sys/bus/mhi/devices/mhi0/power/wakeup \
+    /sys/devices/platform/soc@0/6800000.remoteproc/power/wakeup \
+    /sys/bus/pci/devices/0001:01:00.0/power/wakeup; do
+    # wait up to 60s (30 iterations of 2s) for the path to exist
+    for i in $(seq 1 30); do
+      if [ -e "$path" ]; then
+        echo disabled > "$path" 2>/dev/null
+        break
+      fi
+      sleep 2
+    done
+  done
+) &

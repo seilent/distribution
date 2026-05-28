@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
+# Pre-suspend: freeze userspace FIRST so it stops issuing IO,
+# THEN unbind devices that need clean re-init on resume.
+# (Unbinding xhci-pci-renesas while gamescope/inputplumber are
+#  still polling USB causes hung-task watchdog resets.)
+
+# Freeze gamescope session and steam BEFORE touching USB/i2c devices.
+GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+if [ -n "$GS_PID" ]; then
+  GS_SID=$(ps -o sid= -p $GS_PID | tr -d " ")
+  kill -STOP $(ps -o pid= --sid $GS_SID) 2>/dev/null
+fi
+kill -STOP $(pidof steamwebhelper) 2>/dev/null
+kill -STOP $(pidof inputplumber) 2>/dev/null
+
+# Brief settle so any in-flight USB/i2c IO completes before unbind.
+sleep 0.1
+
+# Unbind touchscreen (TD4310 TDDI loses I2C state across suspend)
+echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/unbind 2>/dev/null
+
+# Unbind PCIe xHCI (Renesas USB host) so PCIe link can re-train cleanly
+echo "0001:01:00.0" > /sys/bus/pci/drivers/xhci-pci-renesas/unbind 2>/dev/null
+
+# Unbind DWC3 USB so HS-PHY enters L2 and controller wakes cleanly
+echo a600000.usb > /sys/bus/platform/drivers/dwc3-qcom/unbind 2>/dev/null

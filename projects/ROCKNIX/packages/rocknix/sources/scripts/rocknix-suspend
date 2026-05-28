@@ -1,0 +1,40 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
+# Real suspend (PSCI SYSTEM_SUSPEND) for SM8550 / AYANEO Pocket ACE
+
+[ "$1" != "power" ] && exit 0
+
+### Suspend
+
+killall evtest 2>/dev/null
+
+GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+if [ -n "$GS_PID" ]; then
+  GS_SID=$(ps -o sid= -p $GS_PID | tr -d " ")
+  kill -STOP $(ps -o pid= --sid $GS_SID) 2>/dev/null
+fi
+kill -STOP $(pidof steamwebhelper) 2>/dev/null
+kill -STOP $(pidof inputplumber) 2>/dev/null
+
+# Unbind touchscreen (no suspend support in polling mode)
+echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/unbind 2>/dev/null
+
+# Disable all wakeup sources except PMIC power key
+for f in /sys/class/wakeup/wakeup*/; do
+  dev=$(readlink -f "${f}device" 2>/dev/null)
+  [ -n "$dev" ] && echo disabled > "${dev}/power/wakeup" 2>/dev/null
+done
+echo enabled > /sys/devices/platform/soc@0/c400000.spmi/spmi-0/0-00/c400000.spmi:pmic@0:pon@1300/c400000.spmi:pmic@0:pon@1300:pwrkey/power/wakeup 2>/dev/null
+
+sleep 1
+echo mem > /sys/power/state
+
+### Resume
+
+echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/bind 2>/dev/null
+kill -CONT $(pidof inputplumber) 2>/dev/null
+if [ -n "$GS_PID" ]; then
+  kill -CONT $(ps -o pid= --sid $GS_SID) 2>/dev/null
+fi
+kill -CONT $(pidof steamwebhelper) 2>/dev/null

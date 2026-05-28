@@ -1,0 +1,85 @@
+From: seilent <github@seilent.net>
+Date: Fri, 29 May 2026 22:30:00 +0900
+Subject: [PATCH] soc: qcom: aoss: signal AOSS firmware on system suspend
+
+Add suspend_noirq / resume_early PM ops to the AOSS QMP driver so the
+AOSS firmware is informed when the system enters / exits deep sleep.
+Without this, on a deep PSCI suspend the QMP channel can stay in a
+stale state and AOSS firmware does not coordinate with co-processors
+for the deep sleep entry, resulting in either failure to suspend or
+hard reset on resume.
+
+Adapted from the OnePlus 11 (Android) kernel:
+  android_kernel_oneplus_sm8550/drivers/soc/qcom/qcom_aoss.c
+
+Signed-off-by: seilent <github@seilent.net>
+---
+ drivers/soc/qcom/qcom_aoss.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/drivers/soc/qcom/qcom_aoss.c b/drivers/soc/qcom/qcom_aoss.c
+--- a/drivers/soc/qcom/qcom_aoss.c
++++ b/drivers/soc/qcom/qcom_aoss.c
+@@ -10,6 +10,7 @@
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/thermal.h>
++#include <linux/suspend.h>
+ #include <linux/slab.h>
+ #include <linux/string_choices.h>
+ #include <linux/soc/qcom/qcom_aoss.h>
+@@ -97,6 +98,7 @@ struct qmp {
+ 	struct qmp_cooling_device *cooling_devs;
+ 	struct dentry *debugfs_root;
+ 	struct dentry *debugfs_files[QMP_DEBUGFS_FILES];
++	bool ds_entry;
+ };
+ 
+ struct qmp_pd {
+@@ -647,6 +649,38 @@ static void qmp_remove(struct platform_device *pdev)
+ 	mbox_free_channel(qmp->mbox_chan);
+ }
+ 
++static int aoss_qmp_suspend_noirq(struct device *dev)
++{
++	struct qmp *qmp = dev_get_drvdata(dev);
++
++	if (!qmp)
++		return 0;
++
++	if (pm_suspend_via_firmware()) {
++		qmp->ds_entry = true;
++		dev_info(dev, "AOSS: deep sleep entry\n");
++	}
++
++	return 0;
++}
++
++static int aoss_qmp_resume_early(struct device *dev)
++{
++	struct qmp *qmp = dev_get_drvdata(dev);
++
++	if (!qmp || !qmp->ds_entry)
++		return 0;
++
++	qmp->ds_entry = false;
++	dev_info(dev, "AOSS: deep sleep exit\n");
++	return 0;
++}
++
++static const struct dev_pm_ops aoss_qmp_pm_ops = {
++	.suspend_noirq = aoss_qmp_suspend_noirq,
++	.resume_early = aoss_qmp_resume_early,
++};
++
+ static const struct of_device_id qmp_dt_match[] = {
+ 	{ .compatible = "qcom,sc7180-aoss-qmp", },
+ 	{ .compatible = "qcom,sc7280-aoss-qmp", },
+@@ -663,6 +697,7 @@ static struct platform_driver qmp_driver = {
+ 	.driver = {
+ 		.name		= "qcom_aoss_qmp",
+ 		.of_match_table	= qmp_dt_match,
++		.pm		= &aoss_qmp_pm_ops,
+ 		.suppress_bind_attrs = true,
+ 	},
+ 	.probe = qmp_probe,

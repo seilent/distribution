@@ -2,11 +2,21 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2023 JELOS (https://github.com/JustEnoughLinuxOS)
 
-### Sleep is currently broken, so we'll disable it.
+### Enable hardware suspend (mem) handled by systemd.
+/usr/bin/suspendmode mem
 
-/usr/bin/suspendmode off
+### Force suspend-to-idle (s2idle) instead of PSCI "deep".
+# SM8550 mainline does not advertise PSCI SYSTEM_SUSPEND; the "deep"
+# path is unstable (spurious wake / SoC reset during long sleep).
+# s2idle reaches cluster power-collapse + DDR self-refresh reliably
+# (~75% lower draw than awake-idle) and wakes cleanly from the power
+# button. "mem" maps to whatever mem_sleep selects, so selecting
+# s2idle here makes `systemctl suspend` use it.
+if [ -e /sys/power/mem_sleep ]; then
+  echo s2idle > /sys/power/mem_sleep 2>/dev/null
+fi
 
-### Ignore power button presses for now, until we can finish up fixing sleep.
+### Power button handled by input_sense, suspend via systemctl suspend
 cat <<EOF >~/.config/logind.conf.d/login.conf
 [Login]
 HandlePowerKey=ignore

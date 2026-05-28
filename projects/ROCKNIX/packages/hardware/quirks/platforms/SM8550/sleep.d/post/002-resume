@@ -1,0 +1,32 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
+# Post-resume: rebind devices in reverse-of-suspend order, re-disable
+# any wakeup sources that bind() resets to enabled, then thaw
+# gamescope/steam.
+
+# Rebind DWC3 USB first (platform device, host of internal hub)
+echo a600000.usb > /sys/bus/platform/drivers/dwc3-qcom/bind 2>/dev/null
+
+# Rebind PCIe xHCI (Renesas USB host)
+echo "0001:01:00.0" > /sys/bus/pci/drivers/xhci-pci-renesas/bind 2>/dev/null
+
+# Rebind Synaptics touchscreen with brief settle delay
+# (TD4310 TDDI needs a moment after I2C bus comes back before re-probe)
+sleep 0.3
+echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/bind 2>/dev/null
+
+# Re-disable wakeup on rebound devices: bind() resets power/wakeup to
+# the driver default (enabled) which would otherwise cause spurious
+# wake on the next suspend.
+echo disabled > /sys/bus/pci/devices/0001:01:00.0/power/wakeup 2>/dev/null
+echo disabled > /sys/bus/platform/devices/a600000.usb/power/wakeup 2>/dev/null
+
+# Thaw processes
+kill -CONT $(pidof inputplumber) 2>/dev/null
+GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+if [ -n "$GS_PID" ]; then
+  GS_SID=$(ps -o sid= -p $GS_PID | tr -d " ")
+  kill -CONT $(ps -o pid= --sid $GS_SID) 2>/dev/null
+fi
+kill -CONT $(pidof steamwebhelper) 2>/dev/null

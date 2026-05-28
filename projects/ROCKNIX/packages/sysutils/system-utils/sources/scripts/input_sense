@@ -313,6 +313,7 @@ set +e
 
   wait  # Wait for all background loops (they never end unless forcibly stopped)
 ) | grep --line-buffered "EV_KEY\|EV_SW\|error reading" | while read line; do
+  POWER_SENSE_START=${POWER_SENSE_START:-$(date +%s)}
 
     # Parse lines from any evtest instance:
     case ${line} in
@@ -386,22 +387,16 @@ set +e
       ;;
       (${FUNCTION_POWER_PRESSED_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_POWER_PRESSED_EVENT}: Pressed"
-        POWER_PRESS_TIME=$(date +%s%N)
-        # Background process: vibrate after 250ms if still holding
-        (usleep 250000; if [ -f /tmp/.power_holding ]; then /usr/bin/rumble; fi) &
-        touch /tmp/.power_holding
+        NOW=$(date +%s)
+        STARTED=${POWER_SENSE_START:-$NOW}
+        if [ $((NOW - STARTED)) -lt 5 ]; then
+          ${DEBUG} && log $0 "Ignoring power press within 5s of start"
+        else
+          systemctl suspend &
+        fi
       ;;
       (${FUNCTION_POWER_RELEASED_EVENT})
-        rm -f /tmp/.power_holding
-        if [ -n "${POWER_PRESS_TIME}" ]; then
-          POWER_RELEASE_TIME=$(date +%s%N)
-          POWER_HOLD_MS=$(( (POWER_RELEASE_TIME - POWER_PRESS_TIME) / 1000000 ))
-          ${DEBUG} && log $0 "Power held for ${POWER_HOLD_MS}ms"
-          if [ ${POWER_HOLD_MS} -ge 250 ]; then
-            /usr/bin/rocknix-fake-suspend power &
-          fi
-          POWER_PRESS_TIME=""
-        fi
+        ${DEBUG} && log $0 "${FUNCTION_POWER_RELEASED_EVENT}: Released"
       ;;
       (${FUNCTION_LID_CLOSE_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_CLOSE_EVENT}: Close"
