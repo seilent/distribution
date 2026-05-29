@@ -128,18 +128,52 @@ voting. During a real s2idle the device `suspend_noirq` phase *should*
 drop pcie/ufs/gpu/display, but `cxsd` stays 0 — so at least one of them
 is not releasing its CX vote in the s2idle path.
 
-### Remaining work for CX collapse
-- Determine, during an actual s2idle (not awake), which sub-domain keeps
-  `cx`/`mmcx` voted: instrument `rpmhpd_aggregate_corner` /
-  `genpd_power_off` for `cx`/`mmcx`, or trace the `0x30000`/`0x30080`
-  rpmh writes across a cycle (note: only *dirty* votes are flushed, so
-  force a corner change or read the cached vote).
-- Prime suspects: `mmcx` held by the DPU/display path (DPMS-off alone
-  did not clear it — the `ae00000.display-subsystem` device likely stays
-  runtime-active), and the `ufs_phy` GDSC (UFS does not runtime-suspend).
-- Make each holder release at suspend (proper device `suspend_noirq`,
-  or quiesce in the pre-suspend hook), then re-test `qcom_stats`
-  `cxsd/ddr/aosd`.
+### Remaining work for CX collapse — verified blocker chain
+`cx` is a genpd parent; these are its **sub-domains** (any one "on" forces
+`cx` on): `mmcx, pcie_0_gdsc, pcie_0_phy_gdsc, pcie_1_gdsc, pcie_1_phy_gdsc,
+ufs_phy_gdsc, ufs_mem_phy_gdsc, usb30_prim_gdsc, usb3_phy_gdsc,
+gpu_cc_cx_gdsc, gpu_cc_gx_gdsc`. **Measured during an actual s2idle cycle,
+`cx total_idle_time` does not move (616→616 ms) — CX never powers off.**
+So the fix is to make every "on" sub-domain release during s2idle:
+
+| Sub-domain | Owner | State in s2idle | Tractability |
+|------------|-------|-----------------|--------------|
+| `usb30_prim_gdsc`/`usb3_phy_gdsc` | dwc3 USB | drops when we unbind dwc3 in pre-suspend | **done** |
+| `gpu_cc_cx/gx_gdsc` | GPU | already `off` when idle | OK |
+| `pcie_0/1_gdsc` (+phy) | ath12k WiFi, Renesas xHCI | stay `on`; GDSCs are `PWRSTS_RET_ON \| VOTABLE` (retention, HW-voted) | unbind both in pre-suspend, like USB; verify they reach off/retention |
+| `mmcx` | display/DPU (`ae00000.display-subsystem`) | stays `on`; DPMS-off alone did NOT clear it | needs DPU to actually suspend (compositor must release DRM/CRTC) |
+| `ufs_phy_gdsc` / `ufs_mem_phy_gdsc` | UFS controller `1d84000.ufshc` (rootfs) | **stays `on`, `total_idle_time=0` ever** | **the hard gate — see below** |
+
+**UFS is the gating blocker.** `ufs_phy_gdsc` is `PWRSTS_OFF_ON` (can fully
+collapse, not always-on/votable) and has exactly one consumer — the UFS
+*controller*. But it never powers off:
+- The UFS PHY clocks (`gcc_ufs_phy_tx/rx_symbol_*`, `_ahb`, `_unipro_core`,
+  `_axi`, all consumed by `ufshc@1d84000`) stay **enabled**; a GDSC cannot
+  collapse while clocks in its domain run. No `clk_ignore_unused` on the
+  cmdline — the UFS driver holds them.
+- UFS *does* suspend in s2idle: `ufs_qcom_suspend` fires (via
+  `__ufshcd_wl_suspend`), and the controller even runtime-suspends. Despite
+  `spm_lvl=5` (POWERDOWN / LINK_OFF) the link/phy is not torn down, so
+  `phy_power_off()` (which lives in `ufs_qcom_setup_clocks(off)`) is never
+  effective and the phy clocks + gdsc stay on.
+- rootfs is on UFS, so we cannot unbind it (unlike USB/PCIe).
+
+So **real mem-sleep (CX collapse) is gated on getting the UFS PHY to fully
+power down on suspend** — a `ufs-qcom` / `phy-qcom-qmp-ufs` power-management
+gap on mainline SM8550. Until that gdsc drops, fixing PCIe/display/USB
+cannot make `cxsd` increment.
+
+Prioritised plan:
+1. **UFS (gate):** make `ufs_phy_gdsc` collapse on s2idle — confirm the link
+   actually reaches `LINK_OFF`, that ufshcd disables the phy clocks, and
+   that `phy_power_off()` runs; patch `ufs-qcom`/phy as needed. Verify via
+   `ufs_phy_gdsc/total_idle_time` growing across a cycle.
+2. **PCIe:** unbind `0000:01:00.0` (ath12k) + `0001:01:00.0` (xHCI) and/or
+   the two root complexes in pre-suspend; verify `pcie_*_gdsc` → off/ret.
+3. **Display:** make the DPU suspend (`mmcx` → off) — compositor releases
+   DRM (gamescope uses `--backend drm`, so this is Steam-path specific).
+4. Only once all sub-domains release: confirm `cx total_idle_time` grows and
+   `qcom_stats cxsd/ddr/aosd` increment, then measure standby current.
 
 ---
 
