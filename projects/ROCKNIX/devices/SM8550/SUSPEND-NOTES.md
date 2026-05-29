@@ -175,6 +175,38 @@ Prioritised plan:
 4. Only once all sub-domains release: confirm `cx total_idle_time` grows and
    `qcom_stats cxsd/ddr/aosd` increment, then measure standby current.
 
+### Two confounds discovered while testing (important)
+1. **Heavy residual activity during s2idle.** Tracing `irq_handler_entry`
+   across a suspend shows the CPUs never quiesce:
+   `arch_timer ~68k, IPI ~42k, xhci_hcd ~10k, pwm-fan ~2.6k, a90000.i2c
+   ~2.3k` plus workqueues `usb_giveback_urb_bh ~12k`,
+   `synaptics_rmi4_polling_work ~1k`, `dbs_work_handler ~8k`. The USB
+   gamepad (`1-3 Controller [AYANEO]`, HID interrupt URBs) and the
+   polling-mode touchscreen are major wakers.
+2. **SSH-over-WiFi confound.** All on-device measurements here were taken
+   over SSH (ZeroTier → WiFi). That live link keeps the radio + CPUs awake
+   and generates traffic, so s2idle never holds during the test. The real
+   power-button path runs `wifictl disable` in the systemd `system-sleep`
+   pre hook (which would drop SSH), so **SSH-based deep-sleep numbers are
+   unreliable** — a clean measurement needs WiFi off (power-button path)
+   with results captured to `/storage` on resume or an external power meter.
+3. **GDSCs don't collapse even with the device unbound.** After unbinding
+   dwc3 + the Renesas xHCI (USB device list empties), `usb30_prim_gdsc` and
+   `pcie_1_gdsc` still read `on`. The qcom gdsc genpd is not powering them
+   off — consistent with `ufs_phy_gdsc` never dropping. So CX cannot
+   collapse, and `cx total_idle_time` stays flat in every test.
+
+### Honest assessment
+True CX/DDR collapse on this mainline kernel is blocked at several
+independent layers (UFS phy never powers down; USB/PCIe GDSCs stay on even
+when unbound; display `mmcx` stays on; plus the activity storm). This is
+consistent with mainline SM8550 not advertising PSCI SYSTEM_SUSPEND and not
+yet supporting deep SoC power collapse. Getting there is a substantial,
+multi-driver effort. The shipped s2idle (APSS-collapse, ~135-370 mA) is the
+practical state today; the next milestone toward deeper sleep is an
+*uncompromised* measurement (power button, WiFi off) to get a true baseline
+before investing in the per-subsystem power-collapse work.
+
 ---
 
 ## Deep-dive: hard hang when suspending under load
