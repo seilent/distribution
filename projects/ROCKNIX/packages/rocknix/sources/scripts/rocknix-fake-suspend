@@ -48,50 +48,75 @@ check_charging() {
 }
 
 check_es_running_game() {
-  local HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:1234/runningGame")
-  ${DEBUG} && log $0 "ES runningGame HTTP_STATUS - ${HTTP_STATUS}"
-  test $? != 0 && return 1 # call failed, assume no game running
-  test "${HTTP_STATUS}" = 201 && return 1 # 201 when no game running
-  test "${HTTP_STATUS}" = 200 && return 0 # 200 when game running
+  # Check whether ES API endpoint is up
+  local endpoint_up=1 # default to endpoint down
+  test "$(nc -vz -w5 localhost 1234 2>&1 | grep 'open')" && endpoint_up=0
+  
+  if [[ $endpoint_up -eq 0 ]]; then
+    ${DEBUG} && log $0 "ES API endpoint up - querying"
+    local HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:1234/runningGame")
+    ${DEBUG} && log $0 "ES runningGame HTTP_STATUS - ${HTTP_STATUS}"
+    test $? != 0 && return 1 # call failed, assume no game running
+    test "${HTTP_STATUS}" = 201 && return 1 # 201 when no game running
+    test "${HTTP_STATUS}" = 200 && return 0 # 200 when game running
+  else
+    ${DEBUG} && log $0 "ES API endpoint down"
+    return 0 # assume a game is running
+  fi
+}
+
+backlight_off() {
+  ${DEBUG} && log $0 "Backlight off"
+
+  for BL_POWER_DEVICE in "${BL_POWER_DEVICES[@]}"; do
+    echo 4 > "${BL_POWER_DEVICE}"
+  done
+}
+
+backlight_on() {
+  ${DEBUG} && log $0 "Backlight on"
+
+  for BL_POWER_DEVICE in "${BL_POWER_DEVICES[@]}"; do
+    echo 0 > "${BL_POWER_DEVICE}"
+  done
 }
 
 display_off() {
-  local dpms_success=false
-
   if [[ "${ENABLE_DPMS}" == "1" ]]; then
+    # DPMS enabled, use it to turn off the display
     ${DEBUG} && log $0 "DPMS - display off"
-    if echo "${UI_SERVICE}" | grep -q "sway"; then
-      swaymsg "output * power off" 2>/dev/null && dpms_success=true
-    elif echo "${UI_SERVICE}" | grep -q "weston"; then
-      weston-dpms -m off 2>/dev/null && dpms_success=true
-    fi
-  fi
 
-  if [[ "${dpms_success}" != "true" ]]; then
-    ${DEBUG} && log $0 "Backlight off"
-    for BL_POWER_DEVICE in "${BL_POWER_DEVICES[@]}"; do
-      echo 4 > "${BL_POWER_DEVICE}"
-    done
+    if [[ -n $(echo "${UI_SERVICE}" | grep "sway") && -n $(pgrep "sway") ]]; then
+      ${DEBUG} && log $0 "Display power off"
+      swaymsg "output * power off"
+    elif [[ -n $(echo "${UI_SERVICE}" | grep "weston") && -n $(pgrep "weston") ]]; then
+      weston-dpms -m off
+    else
+      # Fallback - just turn off the backlight
+      backlight_off
+    fi
+  else
+    # DPMS disabled, just turn off the backlight
+    backlight_off
   fi
 }
 
 display_on() {
-  local dpms_success=false
-
   if [[ "${ENABLE_DPMS}" == "1" ]]; then
+    # DPMS enabled, use it to turn on the display
     ${DEBUG} && log $0 "DPMS - display on"
-    if echo "${UI_SERVICE}" | grep -q "sway"; then
-      swaymsg "output * power on" 2>/dev/null && dpms_success=true
-    elif echo "${UI_SERVICE}" | grep -q "weston"; then
-      weston-dpms -m on 2>/dev/null && dpms_success=true
-    fi
-  fi
 
-  if [[ "${dpms_success}" != "true" ]]; then
-    ${DEBUG} && log $0 "Backlight on"
-    for BL_POWER_DEVICE in "${BL_POWER_DEVICES[@]}"; do
-      echo 0 > "${BL_POWER_DEVICE}"
-    done
+    if [[  -n $(echo "${UI_SERVICE}" | grep "sway") && -n $(pgrep "sway") ]]; then
+      ${DEBUG} && log $0 "Display power on"
+      swaymsg "output * power on"
+    elif [[ -n $(echo "${UI_SERVICE}" | grep "weston") && -n $(pgrep "weston") ]]; then
+      weston-dpms -m on
+    else
+      backlight_on
+    fi
+  else
+    # Fallback - just turn on the backlight
+    backlight_on
   fi
 }
 
@@ -194,92 +219,47 @@ unblock_input() {
   done
 }
 
-freeze_sessions() {
-  ${DEBUG} && log $0 "Freezing gamescope and steam sessions"
-  local GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
-  if [[ -n "${GS_PID}" ]]; then
-    local GS_SID=$(ps -o sid= -p ${GS_PID} | tr -d ' ')
-    if [[ -n "${GS_SID}" ]]; then
-      kill -STOP $(ps -o pid= --sid ${GS_SID}) 2>/dev/null
-    fi
+freeze_processes() {
+  ${DEBUG} && log $0 "Freezing processes"
+
+  # Grab the process to freeze from the set_kill call
+  process_kill_data=$(</tmp/.process-kill-data)
+  process_kill_data=$(echo "${process_kill_data}" | sed 's/-9//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  if [[ -n "${process_kill_data}" ]]; then
+    ${DEBUG} && log $0 "Freezing '${process_kill_data}' processes"
+
+    for process_cmd in ${process_kill_data}; do
+      for pid in $(pgrep -f "${process_cmd}"); do
+        ${DEBUG} && log $0 "Freezing ${process_cmd} process ${pid}"
+        kill -STOP ${pid}
+      done
+    done
   fi
-  # steamwebhelper runs in its own session
-  local SWH_PIDS=$(pidof steamwebhelper 2>/dev/null)
-  if [[ -n "${SWH_PIDS}" ]]; then
-    kill -STOP ${SWH_PIDS} 2>/dev/null
-  fi
-  # inputplumber not needed during sleep (input_sense handles wake)
-  local IP_PID=$(pidof inputplumber 2>/dev/null)
-  if [[ -n "${IP_PID}" ]]; then
-    kill -STOP ${IP_PID} 2>/dev/null
-  fi
-  # unbind touchscreen to save power
-  echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/unbind 2>/dev/null
-  # disable wifi
-  ip link set wlan0 down 2>/dev/null
 }
 
-thaw_sessions() {
-  ${DEBUG} && log $0 "Thawing gamescope and steam sessions"
-  # re-enable wifi
-  ip link set wlan0 up 2>/dev/null
-  # rebind touchscreen
-  echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/bind 2>/dev/null
-  # resume inputplumber
-  local IP_PID=$(pidof inputplumber 2>/dev/null)
-  if [[ -n "${IP_PID}" ]]; then
-    kill -CONT ${IP_PID} 2>/dev/null
-  fi
-  local GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
-  if [[ -n "${GS_PID}" ]]; then
-    local GS_SID=$(ps -o sid= -p ${GS_PID} | tr -d ' ')
-    if [[ -n "${GS_SID}" ]]; then
-      kill -CONT $(ps -o pid= --sid ${GS_SID}) 2>/dev/null
-    fi
-  fi
-  local SWH_PIDS=$(pidof steamwebhelper 2>/dev/null)
-  if [[ -n "${SWH_PIDS}" ]]; then
-    kill -CONT ${SWH_PIDS} 2>/dev/null
-  fi
+unfreeze_processes() {
+  ${DEBUG} && log $0 "Unfreezing processes"
+  kill -CONT -1
 }
 
 do_suspend_actions() {
-  # Turn off display
-  display_off
-
-  # Mute audio
-  mute_audio
-
-  # CPU core parking (if enabled)
-  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && park_cores
-
-  # Block input
-  block_input
-
-  # Disable LEDs
   disable_leds
-
-  # Freeze gamescope session (stops rendering + game) - after display off
-  freeze_sessions
+  mute_audio
+  block_input
+  display_off
+  freeze_processes
+  powersave_governors
+  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && park_cores
 }
 
 do_resume_actions() {
-  # Thaw gamescope session first (needs to be running for display_on)
-  thaw_sessions
-
-  # Turn on display
-  display_on
-
-  # Unmute audio
-  unmute_audio
-
-  # Undo CPU core parking (if enabled)
   [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
-
-  # Unblock input
+  restore_governors
+  unfreeze_processes
+  display_on
   unblock_input
-
-  # Restore LEDs
+  unmute_audio
   enable_leds
 }
 
@@ -355,10 +335,6 @@ suspend() {
 }
 
 resume() {
-  # Set performance governor immediately so resume runs at full speed
-  set_cpu_gov performance
-  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
-
   # Resume event - remove all flag files and kill processes
   ${DEBUG} && log $0 "Removing flags"
   rm -f "${DELAY_FLAG_FILE_PATTERN}".*
@@ -378,8 +354,7 @@ check_hardware_suspend_enabled
 HW_SUSPEND_ENABLED=$?
 
 if [[ $HW_SUSPEND_ENABLED -eq 0 ]]; then
-  ${DEBUG} && log $0 "Hardware suspend enabled, using real suspend"
-  systemd-run --no-block /usr/bin/rocknix-suspend "$@"
+  ${DEBUG} && log $0 "Hardware suspend enabled, exiting"
   exit 0
 fi
 
