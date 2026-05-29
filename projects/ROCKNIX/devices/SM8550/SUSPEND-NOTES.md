@@ -207,6 +207,42 @@ practical state today; the next milestone toward deeper sleep is an
 *uncompromised* measurement (power button, WiFi off) to get a true baseline
 before investing in the per-subsystem power-collapse work.
 
+### Clean measurement method + result (the key data point)
+`systemctl suspend` is **asynchronous** (returns ~1 s before the system
+actually sleeps), so on-device capture scripts must use the **synchronous**
+`echo mem > /sys/power/state`, which blocks until resume. NB this bypasses
+the systemd `system-sleep` hooks, so the script must do its own quiesce
+(stop inputplumber/gamescope, unbind touchscreen/xHCI/dwc3, `wifictl
+disable` + `rfkill block wifi`) and restore afterward. Run it detached
+(`setsid nohup`) since WiFi-off drops SSH; write results to `/storage`
+(persists) and reconnect to read. Set an RTC backstop (`echo +30`).
+
+A clean run (WiFi off, USB unbound, 33 s real sleep) showed:
+- Activity collapses vs the SSH-connected case: `IPI 42k→1.2k`,
+  `xhci_hcd ~10k→0`, `pwm-fan 2.6k→118`. **The SSH/WiFi link was the main
+  "activity storm" — confound confirmed.**
+- **But still nothing collapses:** `cx`/`mmcx total_idle_time` flat,
+  `cxsd/ddr/aosd` 0, `apss` did not increment — and **`arch_timer` fires
+  ~23 000× over 33 s (~88 Hz/CPU)**, i.e. the tick is never frozen and the
+  CPUs never reach deep cluster idle.
+
+### Two stacked blockers (current understanding)
+1. **CPU cluster / tick does not quiesce in s2idle.** `arch_timer` keeps
+   ticking through the sleep, so `power-domain-cluster`/`-system` (and
+   therefore `cx`) never power-collapse. In a healthy s2idle the tick is
+   frozen (`tick_freeze`) and arch_timer should be ~0 during the wait.
+   This is upstream of the rail issue — until the cluster collapses, CX
+   cannot. Next: find why the deepest cpuidle/domain-idle state isn't
+   entered/held under s2idle (governor rejecting `domain_ss3`? deepest
+   cpuidle state not flagged for s2idle? a periodic timer requeuing?).
+2. **CX sub-domain GDSCs stay on** (UFS phy, USB, PCIe, mmcx) — relevant
+   only once (1) is solved.
+
+Bottom line: deep SoC sleep here needs platform-PM bring-up at multiple
+layers (cluster idle under s2idle, then per-subsystem rail release). It is
+not a config tweak. Shipped s2idle (APSS collapse) remains the working
+daily state.
+
 ---
 
 ## Deep-dive: hard hang when suspending under load
