@@ -21,8 +21,12 @@ work can be resumed without re-deriving everything.
 - **Two hard problems remain, both fully characterised here:**
   1. **No CX/DDR/AOSD collapse** → sleep draw is ~hundreds of mA
      (~10 h standby), not the multi-day deep-sleep target. Root cause is
-     interconnect (bus-bandwidth) votes that never reach 0 in the RPMh
-     sleep set.
+     the **CX rail staying enabled/voted at suspend** by consumer
+     sub-domains (multimedia `mmcx` + `ufs_phy`/`pcie`/`gpu` GDSCs) that
+     don't all release. Because the regular `cx` rpmhpd domain's *sleep*
+     vote equals its *active* corner (`to_active_sleep`), any residual CX
+     vote keeps CX on in sleep. (The interconnect/bus votes are a red
+     herring — see the deep-dive; they are already correctly zero.)
   2. **Hard kernel hang when suspending under heavy load** (Steam/gamescope
      mid-game) — a task in uninterruptible (D) state can't be frozen.
 
@@ -65,7 +69,7 @@ Goal counters live in `/sys/kernel/debug/qcom_stats/{aosd,cxsd,ddr,apss}`
 Causal chain, each step verified on-device:
 
 1. CX/DDR collapse in sleep is gated by the **RPMh Sleep TCS** carrying
-   "off" votes for the DDR / LLCC / NoC bus clock managers (BCMs).
+   "off" votes for the relevant rails/resources.
 2. The Sleep/Wake TCS are programmed by `rpmh_flush()`.
    `rpmh_flush()` is invoked from `rpmh_rsc_pd_callback()` on the
    `GENPD_NOTIFY_PRE_OFF` of the power-domain that `apps_rsc` is attached
@@ -80,53 +84,62 @@ Causal chain, each step verified on-device:
    - s2idle: `rpmh_flush` fired ~1355×, `rpmh_rsc_pd_callback` ~5422×
      (cpuidle domain-idle path fires the notifier).
    → **s2idle is the only mode that can collapse CX.**
-4. Even in s2idle the flushed **sleep-set votes are nonzero**. Trace
-   `events/rpmh/rpmh_send_msg`, filter `[sleep]`, decode addresses with
-   `/sys/kernel/debug/cmd-db`:
-   ```
-   0x50000 MC0  (DDR mem controller)  data 0x40000000   <- ON in sleep
-   0x50008 SH1  (LLCC/cache bus)       data 0x40000000   <- ON
-   0x50010 SN0  (system NoC)           data 0x40000000   <- ON
-   0x50038 CN0  (config NoC)           data 0x40000000   <- ON
-   0x50048 QUP1 (geni i2c bus)         data 0x40000000   <- ON
-   0x50068 ACV  (aggregated active)    data 0x40000000   <- ON
-   ```
-5. Those BCMs stay voted because **interconnect (icc) bandwidth consumers
-   never drop their votes to 0 in the sleep set.**
-   `/sys/kernel/debug/interconnect/interconnect_summary`, DDR node
-   (`ebi@interconnect-1`), average (committed) bandwidth voters:
-   ```
-   a600000.usb                 avg 1,000,000   (1 GB/s, constant)
-   ae00000.display-subsystem   avg   716,325
-   a90000.i2c                  avg       400   (touchscreen bus, see below)
-   cpu*/pcie*/pmu              avg 0 (peak only)
-   ```
-   - **USB:** unbinding `a600000.usb` (dwc3-qcom) drops its 1 GB/s vote
-     (verified). The pre-suspend hook already unbinds it.
-   - **Display:** `swaymsg "output * power off"` drops the 716 MB/s vote
-     `716325 → 0` (verified). NOT yet done in the suspend path — candidate
-     fix: DPMS-off / disable CRTC before suspend.
-   - **Touchscreen i2c:** `a90000.i2c` (bus i2c-2) hosts `2-0070`
-     (synaptics_dsx, run in **polling mode**) → constant transfers keep the
-     geni controller active → votes the whole QUP1→NoC→LLCC→DDR path on.
-     This maps to the `QUP1 0x40000000` sleep vote.
-6. **Even after dropping USB + display, `cxsd` stayed 0** — the residual
-   i2c/QUP1 + `ACV` `0x40000000` votes remain. So collapse needs *every*
-   bus voter released, and the meaning of the `ACV` vote / the
-   `0x40000000` value still needs decoding (likely needs Qualcomm BCM
-   command-format knowledge).
+
+### The interconnect/BCM votes are NOT the blocker (corrected)
+A first pass blamed the bus-bandwidth (BCM) sleep votes, because the
+`[sleep]`-set writes (trace `events/rpmh/rpmh_send_msg`, decode addr via
+`/sys/kernel/debug/cmd-db`) showed nonzero data:
+```
+0x50000 MC0  (DDR)   0x50008 SH1 (LLCC)   0x50010 SN0 (SNoC)
+0x50038 CN0  (CNoC)  0x50048 QUP1 (i2c)   0x50068 ACV   = data 0x40000000
+```
+**This was wrong.** Per `drivers/interconnect/qcom/bcm-voter.c`
+`tcs_cmd_gen()`: when `vote_x==0 && vote_y==0` it sets `valid=false`, and
+`BCM_TCS_CMD(commit, valid, vote_x, vote_y) = (commit<<30)|(valid<<29)|…`.
+So **`0x40000000` = commit=1, valid=0, vote=0 — a ZERO bandwidth vote
+with the commit bit set**, i.e. those buses are correctly voted OFF in
+the sleep set. Dropping the USB (1 GB/s) and display (716 MB/s) *active*
+icc votes therefore made no difference to `cxsd` (verified: still 0).
+The interconnect is fine.
+
+### The real blocker: the CX rail stays enabled/voted at suspend
+The captured sleep set contained **only BCM addresses (`0x500xx`) and no
+CX/MX rail votes (`0x300xx`)** — cmd-db maps `cx.lvl=0x30000`,
+`mx.lvl=0x30010`, `mmcx.lvl=0x30080`, etc. `rpmhpd` *does* emit sleep
+votes (`drivers/pmdomain/qcom/rpmhpd.c:912`,
+`rpmhpd_send_corner(pd, RPMH_SLEEP_STATE, sleep_corner, …)`), but for the
+regular (non-`active_only`) `cx` domain, `to_active_sleep()` sets
+**`sleep_corner = active_corner`**. So CX's sleep vote simply tracks
+whatever CX is voted to when we suspend — if any consumer still holds CX,
+it stays on in sleep (and no *change* means no dirty flush, hence no
+`0x30000` write appears in the trace).
+
+Measured CX holders (`/sys/kernel/debug/pm_genpd/`):
+- Awake, `cx` perf = 256.
+- Unbinding USB drops it 256 → 64.
+- Forcing display off too: **still 64**, held by `mmcx` (= 64, the
+  multimedia-CX rail) plus enable-votes from
+  `ufs_phy_gdsc/ufs_mem_phy_gdsc`, `pcie_*_gdsc`, `gpu_cc_cx/gx_gdsc`.
+- `1d84000.ufshc` shows `runtime_status=active` (rootfs UFS never
+  runtime-suspends).
+
+So CX cannot reach corner 0 / disabled while those sub-domains are still
+voting. During a real s2idle the device `suspend_noirq` phase *should*
+drop pcie/ufs/gpu/display, but `cxsd` stays 0 — so at least one of them
+is not releasing its CX vote in the s2idle path.
 
 ### Remaining work for CX collapse
-- Ensure the geni-i2c / polling touchscreen fully drops its icc vote on
-  suspend (unbind touchscreen earlier, stop polling, or force the i2c
-  controller to runtime-suspend so QUP1 → 0).
-- Add display DPMS-off / CRTC-disable to the pre-suspend path (drops the
-  716 MB/s DDR vote). Note: in Steam, gamescope holds DRM directly
-  (`--backend drm`), so sway DPMS won't apply — needs a gamescope-aware
-  method.
-- Decode `ACV` (`0x50068`) and the `0x40000000` BCM sleep value; confirm
-  whether it is a real bandwidth vote or a structural keepalive.
-- Re-test `qcom_stats` `cxsd/ddr/aosd` after each.
+- Determine, during an actual s2idle (not awake), which sub-domain keeps
+  `cx`/`mmcx` voted: instrument `rpmhpd_aggregate_corner` /
+  `genpd_power_off` for `cx`/`mmcx`, or trace the `0x30000`/`0x30080`
+  rpmh writes across a cycle (note: only *dirty* votes are flushed, so
+  force a corner change or read the cached vote).
+- Prime suspects: `mmcx` held by the DPU/display path (DPMS-off alone
+  did not clear it — the `ae00000.display-subsystem` device likely stays
+  runtime-active), and the `ufs_phy` GDSC (UFS does not runtime-suspend).
+- Make each holder release at suspend (proper device `suspend_noirq`,
+  or quiesce in the pre-suspend hook), then re-test `qcom_stats`
+  `cxsd/ddr/aosd`.
 
 ---
 
