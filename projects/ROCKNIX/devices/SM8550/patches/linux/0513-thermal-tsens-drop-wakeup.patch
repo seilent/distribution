@@ -1,0 +1,36 @@
+From: seilent <github@seilent.net>
+Date: Sat, 30 May 2026 03:05:00 +0900
+Subject: [PATCH] thermal: qcom: tsens: do not arm TSENS IRQs as wakeup sources
+
+The TSENS sensor interrupts are level-triggered and registered as system
+wakeup sources via enable_irq_wake(). On SM8550 (AYANEO Pocket ACE) this
+makes the device wake itself from s2idle almost immediately whenever the
+SoC is warm: as it sleeps and cools, the temperature crosses a trip and
+the level IRQ asserts continuously, producing a wake storm (observed
+~1900 IRQ 23 events in ~15 s, waking the device in well under the test's
+RTC backstop). It manifests as "the device turns on by itself" after
+gaming, and was previously misattributed to the power button / Steam.
+
+A handheld does not need a thermal interrupt to wake the AP from sleep:
+the PMIC performs emergency thermal shutdown autonomously in hardware,
+and the power key remains a wakeup source for the user. Drop the
+enable_irq_wake() call so TSENS interrupts still drive thermal
+throttling while running, but no longer wake the system from suspend.
+
+Signed-off-by: seilent <github@seilent.net>
+---
+ drivers/thermal/qcom/tsens.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/drivers/thermal/qcom/tsens.c b/drivers/thermal/qcom/tsens.c
+--- a/drivers/thermal/qcom/tsens.c
++++ b/drivers/thermal/qcom/tsens.c
+@@ -1204,8 +1204,6 @@ static int tsens_register_irq(struct tsens_priv *priv, char *irqname,
+ 		if (ret)
+ 			dev_err(&pdev->dev, "%s: failed to get irq\n",
+ 				__func__);
+-		else
+-			enable_irq_wake(irq);
+ 	}
+ 
+ 	put_device(&pdev->dev);
