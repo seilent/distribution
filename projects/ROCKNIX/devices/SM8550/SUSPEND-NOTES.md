@@ -336,3 +336,54 @@ echo freezer > /sys/power/pm_test   # also: devices / core
   survive a hang + power-cycle.
 - Build on builder: `make docker-SM8550`; kernel build runs
   `kernel_make oldconfig` so it resolves added Kconfig symbols.
+
+---
+
+## Session 2: full causal chain traced end-to-end (2026-05-30)
+
+Goal restated: real low-power standby = CX/DDR rail collapse (cxsd/ddr/aosd
+in qcom_stats), not just APSS. On this SoC the path is s2idle/deep driving
+RPMh into AOSD, since PSCI "deep"/S2RAM... actually "deep" IS listed and
+wakes fine now (0512/0513). Findings, in order:
+
+1. **s2idle structurally can't reach the system genpd domain.**
+   `cpuidle_enter_s2idle()`/`enter_s2idle_proper()` never set
+   `dev->next_hrtimer` (cpuidle.c) unlike `cpuidle_enter()`, so it stays 0.
+   The genpd cpu governor `cpu_power_down_ok` (pmdomain/governor.c) then
+   computes `idle_duration <= 0` and rejects the system domain every time.
+   → **Fix committed: patch 0514** sets `next_hrtimer = KTIME_MAX` on s2idle
+   entry. Measured effect: system-domain `Above` went 0 → 265 (governor now
+   clears the residency gate). Still not sufficient under s2idle because of:
+2. **s2idle also blocked by `cpus_peek_for_pending_ipi`.** Func-call IPIs
+   (~930/s) and irq_work IPIs (~300/s) keep an SGI pending, so even after the
+   residency gate passes, the governor rejects. (Multi-CPU online + IPI
+   traffic; offlining cpu1-7 did not help.)
+3. **Two governors.** `pm_domain_cpu_gov` has `.power_down_ok =
+   cpu_power_down_ok` (cpuidle path: next_hrtimer + IPI gates) and
+   `system_power_down_ok = cpu_system_power_down_ok` (suspend path:
+   **latency-only**, no next_hrtimer/IPI). So **"deep" (the syscore suspend
+   path) reaches the system domain where s2idle cannot.**
+4. **"deep" now enters the system domain.** With 0510 (system_pd) + 0512
+   (PDC wake) + 0514, `echo deep; echo mem` wakes cleanly (RTC) and
+   `power-domain-system` `Usage` went 0 → 1 (first ever), `apss` increments.
+   `_genpd_power_off()` fires `GENPD_NOTIFY_PRE_OFF` on both paths, so the
+   RSC `rpmh_flush` DOES run when the system domain powers off.
+5. **Irreducible blocker: the CX rail's consumer GDSCs never power-collapse.**
+   `cx` is a separate rpmhpd rail (not in the system_pd genpd hierarchy), so
+   AOSD alone doesn't drop it. Its sleep vote = max of consumer votes, held
+   nonzero by sub-domain GDSCs that stay on in BOTH s2idle and deep:
+   `ufs_phy_gdsc` (UFS controller clocks never gate → phy gdsc never off;
+   rootfs is on UFS so it can't be unbound), `mmcx` (display/DPU), and
+   pcie/usb (these last two can be dropped via the pre-suspend unbind hook).
+   Measured deep cycle: cx/mmcx/ufs_phy_gdsc idle_time delta = 0 (never
+   powered off); cxsd/ddr/aosd = 0; only apss increments.
+
+### Net state
+- Stable wakeable suspend (s2idle or deep) with APSS collapse. ~135-370 mA.
+- 0514 is a genuine, upstream-worthy cpuidle fix (committed) but not
+  sufficient alone.
+- **True CX/DDR collapse remains gated on making `ufs_phy_gdsc` (and `mmcx`)
+  power-collapse on suspend** — i.e. ufs-qcom must fully tear down the UFS
+  PHY (LINK_OFF + disable the gcc_ufs_phy_* clocks so the gdsc can collapse)
+  and the DPU must release mmcx. That is per-driver PM work and is the next
+  (and likely final) front for multi-day standby on mainline SM8550.
