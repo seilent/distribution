@@ -1,18 +1,49 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
-# Pre-suspend: freeze userspace FIRST so it stops issuing IO,
-# THEN unbind devices that need clean re-init on resume.
-# (Unbinding xhci-pci-renesas while gamescope/inputplumber are
-#  still polling USB causes hung-task watchdog resets.)
+# Pre-suspend: gracefully quiesce a running game session BEFORE suspend,
+# then unbind devices that need clean re-init on resume.
+#
+# Suspending while a game is rendering under load leaves the GPU mid-frame
+# and hangs the resume path. The fix is to (1) cap gamescope's FPS to 1 so
+# the GPU ramps down and runtime-suspends, and (2) freeze the whole
+# gamescope scope cgroup atomically (gamescope + Steam + game + FEX/wine,
+# including any Steam update/download), then let the GPU pipeline drain
+# before suspending. A 2s settle is required; 1s leaves it dirty and the
+# device hangs on resume.
 
-# Freeze gamescope session and steam BEFORE touching USB/i2c devices.
 GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+FROZEN=/run/.suspend-froze-scope
+rm -f "$FROZEN"
+
 if [ -n "$GS_PID" ]; then
-  GS_SID=$(ps -o sid= -p $GS_PID | tr -d " ")
-  kill -STOP $(ps -o pid= --sid $GS_SID) 2>/dev/null
+  # Derive gamescope's own cgroup scope (steam-bigpicture.scope) and its
+  # runtime env (needed to talk to it via gamescopectl).
+  GS_CG=$(grep '^0::' /proc/$GS_PID/cgroup 2>/dev/null | sed 's|^0::||')
+  SCOPE="/sys/fs/cgroup/unified${GS_CG}"
+  GS_ENV=$(tr '\0' '\n' < /proc/$GS_PID/environ 2>/dev/null | \
+           grep -E '^(DISPLAY|XDG_RUNTIME_DIR|GAMESCOPE_WAYLAND_DISPLAY)=')
+
+  if [ -e "$SCOPE/cgroup.freeze" ]; then
+    # 1. Cap FPS to 1: GPU ramps down and runtime-suspends (cleanest state
+    #    before the kernel powers it off; also helps the game survive).
+    env $GS_ENV gamescopectl debug_set_fps_limit 1 >/dev/null 2>&1
+    # 2. Freeze the whole session atomically. cgroup freeze handles
+    #    mid-syscall threads cleanly, unlike scattered kill -STOP, and
+    #    catches Steam (incl. updates), the game and FEX which live in a
+    #    different session than gamescope.
+    echo 1 > "$SCOPE/cgroup.freeze" && echo "$SCOPE" > "$FROZEN"
+    # 3. Settle: let the GPU drain in-flight work and runtime-suspend.
+    sleep 2
+  else
+    # No freezable scope: fall back to stopping the gamescope session.
+    GS_SID=$(ps -o sid= -p $GS_PID | tr -d " ")
+    kill -STOP $(ps -o pid= --sid $GS_SID) 2>/dev/null
+    kill -STOP $(pidof steamwebhelper) 2>/dev/null
+  fi
 fi
-kill -STOP $(pidof steamwebhelper) 2>/dev/null
+
+# inputplumber lives outside the gamescope scope; stop it regardless.
 kill -STOP $(pidof inputplumber) 2>/dev/null
 
 # Brief settle so any in-flight USB/i2c IO completes before unbind.

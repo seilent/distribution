@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2025-present ROCKNIX (https://github.com/ROCKNIX)
 # Post-resume: rebind devices in reverse-of-suspend order, re-disable
-# any wakeup sources that bind() resets to enabled, then thaw
-# gamescope/steam.
+# wakeup sources that bind() re-enables, then thaw the game session and
+# restore the FPS cap.
+
+FROZEN=/run/.suspend-froze-scope
 
 # Rebind DWC3 USB first (platform device, host of internal hub)
 echo a600000.usb > /sys/bus/platform/drivers/dwc3-qcom/bind 2>/dev/null
@@ -22,11 +24,33 @@ echo "2-0070" > /sys/bus/i2c/drivers/synaptics_dsx_i2c/bind 2>/dev/null
 echo disabled > /sys/bus/pci/devices/0001:01:00.0/power/wakeup 2>/dev/null
 echo disabled > /sys/bus/platform/devices/a600000.usb/power/wakeup 2>/dev/null
 
-# Thaw processes
-kill -CONT $(pidof inputplumber) 2>/dev/null
 GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
-if [ -n "$GS_PID" ]; then
+
+if [ -e "$FROZEN" ]; then
+  # We froze the gamescope scope at suspend: thaw it, then lift the FPS cap.
+  SCOPE=$(cat "$FROZEN" 2>/dev/null)
+  echo 0 > "$SCOPE/cgroup.freeze" 2>/dev/null
+  rm -f "$FROZEN"
+  if [ -n "$GS_PID" ]; then
+    GS_ENV=$(tr '\0' '\n' < /proc/$GS_PID/environ 2>/dev/null | \
+             grep -E '^(DISPLAY|XDG_RUNTIME_DIR|GAMESCOPE_WAYLAND_DISPLAY)=')
+    # Lift the suspend FPS cap. 60 = panel refresh (full speed); Steam's
+    # own FPS setting reasserts on the next performance-menu interaction.
+    env $GS_ENV gamescopectl debug_set_fps_limit 60 >/dev/null 2>&1
+  fi
+elif [ -n "$GS_PID" ]; then
+  # Fallback path (scope was not frozen): thaw the gamescope session.
   GS_SID=$(ps -o sid= -p $GS_PID | tr -d " ")
   kill -CONT $(ps -o pid= --sid $GS_SID) 2>/dev/null
+  kill -CONT $(pidof steamwebhelper) 2>/dev/null
 fi
-kill -CONT $(pidof steamwebhelper) 2>/dev/null
+
+# Thaw inputplumber (stopped on both suspend paths).
+kill -CONT $(pidof inputplumber) 2>/dev/null
+
+# Clear the power-press debounce timestamp now that the resume sequence is
+# complete: a press after this point is a fresh intent and must not be
+# debounced against the pre-suspend press (wall clock advances during
+# sleep, but this also covers very short sleep+wake cycles). Clearing here
+# (at the end) still debounces a press that lands mid-resume.
+rm -f /run/.last_power_press
