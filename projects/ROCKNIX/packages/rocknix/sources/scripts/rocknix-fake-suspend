@@ -220,31 +220,33 @@ unblock_input() {
   done
 }
 
-freeze_processes() {
-  ${DEBUG} && log $0 "Freezing processes"
-
-  # Grab the process to freeze from the set_kill call
-  process_kill_data=$(</tmp/.process-kill-data)
-  process_kill_data=$(echo "${process_kill_data}" | sed 's/-9//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-  if [[ -n "${process_kill_data}" ]]; then
-    ${DEBUG} && log $0 "Freezing '${process_kill_data}' processes"
-
-    for process_cmd in ${process_kill_data}; do
-      for pid in $(pgrep -f "${process_cmd}"); do
-        ${DEBUG} && log $0 "Freezing ${process_cmd} process ${pid}"
-        kill -STOP ${pid}
-      done
-    done
+cap_fps() {
+  local GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+  if [ -n "$GS_PID" ]; then
+    ${DEBUG} && log $0 "Cap FPS to 1"
+    local GS_ENV=$(tr '\0' '\n' < /proc/$GS_PID/environ 2>/dev/null | \
+                   grep -E '^(DISPLAY|XDG_RUNTIME_DIR|GAMESCOPE_WAYLAND_DISPLAY)=')
+    env $GS_ENV gamescopectl debug_set_fps_limit 1 >/dev/null 2>&1
   fi
 }
 
-unfreeze_processes() {
-  ${DEBUG} && log $0 "Unfreezing processes"
-  kill -CONT -1
+uncap_fps() {
+  local GS_PID=$(pidof gamescope-wl 2>/dev/null || pidof gamescope 2>/dev/null)
+  if [ -n "$GS_PID" ]; then
+    ${DEBUG} && log $0 "Restore FPS to 60"
+    local GS_ENV=$(tr '\0' '\n' < /proc/$GS_PID/environ 2>/dev/null | \
+                   grep -E '^(DISPLAY|XDG_RUNTIME_DIR|GAMESCOPE_WAYLAND_DISPLAY)=')
+    env $GS_ENV gamescopectl debug_set_fps_limit 60 >/dev/null 2>&1
+  fi
 }
 
 do_suspend_actions() {
+  # Cap FPS to 1 (GPU idles, saves power)
+  cap_fps
+
+  # Set governors to powersave
+  powersave_governors
+
   # Turn off display
   display_off
 
@@ -262,14 +264,20 @@ do_suspend_actions() {
 }
 
 do_resume_actions() {
+  # Restore governors first (system needs full speed before uncapping FPS)
+  restore_governors
+
+  # Undo CPU core parking (if enabled)
+  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+
   # Turn on display
   display_on
 
   # Unmute audio
   unmute_audio
 
-  # Undo CPU core parking (if enabled)
-  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+  # Restore FPS (after governors are back so system can handle the load)
+  uncap_fps
 
   # Unblock input
   unblock_input
