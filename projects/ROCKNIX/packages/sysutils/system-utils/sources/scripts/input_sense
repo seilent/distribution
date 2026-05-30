@@ -386,17 +386,35 @@ set +e
       ;;
       (${FUNCTION_POWER_PRESSED_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_POWER_PRESSED_EVENT}: Pressed"
-        # Devices with real kernel suspend enabled (suspendmode mem/freeze/
-        # standby, e.g. SM8550) use systemd suspend; everything else falls
-        # back to fake-suspend so devices that depend on it are unaffected.
-        case "$(get_setting system.suspendmode)" in
-          mem|freeze|standby)
-            systemctl suspend &
-          ;;
-          *)
-            /usr/bin/rocknix-fake-suspend power &
-          ;;
-        esac
+        # The power key doubles as the s2idle wake source. The press that
+        # wakes the device is replayed to us on resume and would otherwise
+        # immediately re-suspend, racing the resume -> hang ("only fan
+        # spins"). If a suspend/resume cycle completed since the last press
+        # we handled, this press woke the device: skip it. Also debounce
+        # rapid double-presses (within 3s) so they can't double-trigger.
+        POWER_NOW=$(date +%s)
+        POWER_LAST=$(cat /run/.last_power_press 2>/dev/null || echo 0)
+        SUSPEND_CNT=$(cat /sys/power/suspend_stats/success 2>/dev/null || echo 0)
+        SUSPEND_CNT_SEEN=$(cat /run/.suspend_count_seen 2>/dev/null || echo 0)
+        if [ "${SUSPEND_CNT}" != "${SUSPEND_CNT_SEEN}" ]; then
+          echo "${SUSPEND_CNT}" > /run/.suspend_count_seen
+          ${DEBUG} && log $0 "Ignoring wake-up power press"
+        elif [ $((POWER_NOW - POWER_LAST)) -lt 3 ]; then
+          ${DEBUG} && log $0 "Power press debounced"
+        else
+          echo "${POWER_NOW}" > /run/.last_power_press
+          # Devices with real kernel suspend enabled (suspendmode mem/freeze/
+          # standby, e.g. SM8550) use systemd suspend; everything else falls
+          # back to fake-suspend so devices that depend on it are unaffected.
+          case "$(get_setting system.suspendmode)" in
+            mem|freeze|standby)
+              systemctl suspend &
+            ;;
+            *)
+              /usr/bin/rocknix-fake-suspend power &
+            ;;
+          esac
+        fi
       ;;
       (${FUNCTION_LID_CLOSE_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_CLOSE_EVENT}: Close"
