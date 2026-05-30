@@ -1,0 +1,59 @@
+From: seilent <github@seilent.net>
+Date: Sat, 30 May 2026 11:45:00 +0900
+Subject: [PATCH] cpuidle: s2idle: set next_hrtimer so genpd can reach the
+ deepest domain
+
+The genpd CPU-domain governor (cpu_power_down_ok) predicts the idle
+duration from the earliest dev->next_hrtimer across all online CPUs and
+rejects a domain idle state when that duration is too short.
+
+cpuidle_enter() maintains dev->next_hrtimer (set before entry, cleared
+after), but the suspend-to-idle path (cpuidle_enter_s2idle ->
+enter_s2idle_proper) never updates it, so it stays 0 from the last
+normal idle exit. The governor then computes idle_duration_ns =
+next_hrtimer - now <= 0 and rejects the parent ("system") power domain
+on every iteration of the s2idle loop. The per-CPU and cluster domains
+still enter, but the system domain (which drives AOSS/RPMh sleep and lets
+CX/DDR collapse) never does, so the SoC cannot reach its deepest sleep
+under s2idle.
+
+During s2idle a CPU stays idle until a wakeup IRQ, with the tick frozen;
+there is no timer-based wakeup to predict. Set dev->next_hrtimer to
+KTIME_MAX before the s2idle entry so the governor sees an effectively
+infinite idle duration and can power down the cluster and system
+domains. It is NOT cleared on exit: in s2idle a CPU that briefly wakes to
+service an IRQ re-enters s2idle immediately, so it must keep advertising
+an infinite next wakeup; otherwise, with several CPUs, at least one is
+always transiently "awake" with next_hrtimer==0 and the governor (which
+takes the minimum across all CPUs) rejects the parent domain forever.
+The value is overwritten by the next normal cpuidle_enter() after resume.
+
+enter_s2idle_proper() is noinstr, so the field is set in
+cpuidle_enter_s2idle() (a plain function) where calling/assigning is
+safe.
+
+Signed-off-by: seilent <github@seilent.net>
+---
+ drivers/cpuidle/cpuidle.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/cpuidle/cpuidle.c b/drivers/cpuidle/cpuidle.c
+--- a/drivers/cpuidle/cpuidle.c
++++ b/drivers/cpuidle/cpuidle.c
+@@ -198,7 +198,16 @@ int cpuidle_enter_s2idle(struct cpuidle_driver *drv, struct cpuidle_device *dev,
+ 	 */
+ 	index = find_deepest_state(drv, dev, latency_limit_ns, 0, true);
+ 	if (index > 0) {
++		/*
++		 * enter_s2idle_proper() does not maintain dev->next_hrtimer the
++		 * way cpuidle_enter() does, leaving it at 0. The genpd cpu
++		 * governor would then see a non-positive idle duration and
++		 * reject the deepest (system) power domain. In s2idle the CPU
++		 * idles until a wakeup IRQ, so advertise an infinite next
++		 * wakeup to let the cluster/system domains power down (AOSD).
++		 */
++		WRITE_ONCE(dev->next_hrtimer, KTIME_MAX);
+ 		enter_s2idle_proper(drv, dev, index);
+ 		local_irq_enable();
+ 	}
+ 	return index;
