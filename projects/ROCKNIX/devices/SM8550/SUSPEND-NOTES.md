@@ -227,21 +227,40 @@ A clean run (WiFi off, USB unbound, 33 s real sleep) showed:
   CPUs never reach deep cluster idle.
 
 ### Two stacked blockers (current understanding)
-1. **CPU cluster / tick does not quiesce in s2idle.** `arch_timer` keeps
-   ticking through the sleep, so `power-domain-cluster`/`-system` (and
-   therefore `cx`) never power-collapse. In a healthy s2idle the tick is
-   frozen (`tick_freeze`) and arch_timer should be ~0 during the wait.
-   This is upstream of the rail issue — until the cluster collapses, CX
-   cannot. Next: find why the deepest cpuidle/domain-idle state isn't
-   entered/held under s2idle (governor rejecting `domain_ss3`? deepest
-   cpuidle state not flagged for s2idle? a periodic timer requeuing?).
+1. **The genpd *system* power-domain idle state is never entered under
+   s2idle** — `power-domain-system` `S0: Usage=0, Rejected=<millions>`,
+   every cycle. The per-CPU `cpu-sleep` and `power-domain-cluster S1`
+   states DO work; only the top system domain (which is what triggers the
+   AOSS/RPMh sleep path and lets CX/DDR/AOSD collapse) is always rejected.
+   This was confirmed **invariant** across:
+   - `domain_ss3` min-residency 9000 µs → 2000 µs (rebuilt + flashed),
+   - cpufreq governor `ondemand` → `performance`,
+   - userspace running → ES/sway session + daemons fully stopped,
+   - WiFi on/off, USB bound/unbound.
+   Mechanism (genpd `cpu_power_down_ok`, `drivers/pmdomain/governor.c`):
+   it takes `domain_wakeup = earliest dev->next_hrtimer across ALL CPUs`
+   in the domain; if any one CPU has a timer due soon, `idle_duration` is
+   tiny and the state is rejected. With 8 CPUs whose ticks never reach
+   simultaneous deep NOHZ idle during s2idle (HZ=250, so a stagger of 8
+   ticks ⇒ a wakeup roughly every ~0.5 ms), the earliest next-hrtimer is
+   always far below any sane residency ⇒ rejected every time. So **the
+   CPUs never go simultaneously quiet long enough for the system domain to
+   power off**, and CX can never collapse. Lowering residency cannot fix
+   this (the predicted idle is sub-millisecond); the real fix is getting
+   all CPUs to genuine NOHZ-idle quiescence under s2idle (why the tick/
+   timers don't stop needs ftrace — which the shipped clean kernel lacks;
+   use a debug build with `CONFIG_FTRACE` + `hrtimer_expire_entry` /
+   `cpu_idle` events to find the per-CPU timer that won't stop).
 2. **CX sub-domain GDSCs stay on** (UFS phy, USB, PCIe, mmcx) — relevant
    only once (1) is solved.
 
-Bottom line: deep SoC sleep here needs platform-PM bring-up at multiple
-layers (cluster idle under s2idle, then per-subsystem rail release). It is
-not a config tweak. Shipped s2idle (APSS collapse) remains the working
-daily state.
+Bottom line: deep SoC sleep here is blocked at the *cpuidle/genpd system-
+domain* layer — the deepest domain idle state is never entered under
+s2idle because the 8 CPUs never reach simultaneous deep idle. This is a
+mainline SM8550 platform-PM gap, not a config tweak, and the shipped
+s2idle (APSS collapse, ~135-370 mA) remains the working daily state.
+Confirmed negative experiments (do NOT retry): lowering `domain_ss3`
+residency/latency; changing cpufreq governor; stopping all userspace.
 
 ---
 
