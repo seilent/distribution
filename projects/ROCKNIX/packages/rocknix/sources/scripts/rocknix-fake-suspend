@@ -244,8 +244,11 @@ do_suspend_actions() {
   # Cap FPS to 1 (GPU idles, saves power)
   cap_fps
 
-  # Set governors to powersave
-  powersave_governors
+  # Cap CPU max freq (low power but responsive for wake)
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    cat "$policy/scaling_max_freq" > "$policy/scaling_max_freq.save" 2>/dev/null
+    echo 441600 > "$policy/scaling_max_freq" 2>/dev/null
+  done
 
   # Turn off display
   display_off
@@ -264,8 +267,13 @@ do_suspend_actions() {
 }
 
 do_resume_actions() {
-  # Restore governors first (system needs full speed before uncapping FPS)
-  restore_governors
+  # Restore CPU max freq
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    if [ -f "$policy/scaling_max_freq.save" ]; then
+      cat "$policy/scaling_max_freq.save" > "$policy/scaling_max_freq" 2>/dev/null
+      rm -f "$policy/scaling_max_freq.save"
+    fi
+  done
 
   # Undo CPU core parking (if enabled)
   [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
@@ -307,9 +315,6 @@ do_shutdown() {
 
   # Unmute audio - otherwise wireplumber will keep it muted on next boot
   unmute_audio
-
-  # Unfreeze prococesses - otherwise ES will be unable to respond to API calls
-  unfreeze_processes
 
   # Check whether a game is running
   check_es_running_game
@@ -364,9 +369,15 @@ suspend() {
 }
 
 resume() {
-  # Set performance governor immediately so resume runs at full speed
-  set_cpu_gov performance
-  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+  # Unpark cores and restore max freq immediately for fast resume
+  for online in /sys/devices/system/cpu/cpu*/online; do
+    echo 1 > "$online" 2>/dev/null
+  done
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    if [ -f "$policy/scaling_max_freq.save" ]; then
+      cat "$policy/scaling_max_freq.save" > "$policy/scaling_max_freq" 2>/dev/null
+    fi
+  done
 
   # Resume event - remove all flag files and kill processes
   ${DEBUG} && log $0 "Removing flags"
