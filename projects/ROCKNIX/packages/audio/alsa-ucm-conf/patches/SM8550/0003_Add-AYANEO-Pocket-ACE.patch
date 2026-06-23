@@ -20,15 +20,23 @@ new file mode 100644
 index 0000000..bc32ab7
 --- /dev/null
 +++ b/ucm2/AYANEO/Pocket/HiFi.conf
-@@ -0,0 +1,82 @@
+@@ -0,0 +1,122 @@
 +SectionVerb {
 +	EnableSequence [
 +		cset "name='DISPLAY_PORT_RX_0 Audio Mixer MultiMedia2' 0"
 +		cset "name='WSA_CODEC_DMA_RX_0 Audio Mixer MultiMedia2' 1"
 +		cset "name='MultiMedia3 Mixer VA_CODEC_DMA_TX_0' 1"
++		cset "name='SpkrLeft COMP Switch' 0"
++		cset "name='SpkrLeft BOOST Switch' 1"
++		cset "name='SpkrLeft DAC Switch' 1"
++		cset "name='SpkrLeft VISENSE Switch' 0"
++		cset "name='SpkrLeft WSA MODE' 0"
++		cset "name='SpkrRight COMP Switch' 0"
++		cset "name='SpkrRight BOOST Switch' 1"
++		cset "name='SpkrRight DAC Switch' 1"
++		cset "name='SpkrRight VISENSE Switch' 0"
++		cset "name='SpkrRight WSA MODE' 0"
 +	]
-+
-+	Include.wsae.File "/codecs/wsa884x/two-speakers/DefaultEnableSeq.conf"
 +
 +	Value {
 +		TQ "HiFi"
@@ -38,16 +46,48 @@ index 0000000..bc32ab7
 +SectionDevice."Speaker" {
 +	Comment "Speaker playback"
 +
-+        Include.wsmspk1e.File "/codecs/qcom-lpass/wsa-macro/SpeakerEnableSeq.conf"
-+        Include.wsmspk1d.File "/codecs/qcom-lpass/wsa-macro/SpeakerDisableSeq.conf"
-+        Include.wsaspkd.File "/codecs/wsa884x/two-speakers/SpeakerSeq.conf"
++	EnableSequence [
++		cset "name='WSA RX0 MUX' AIF1_PB"
++		cset "name='WSA RX1 MUX' AIF1_PB"
++		cset "name='WSA_RX0 INP0' RX0"
++		cset "name='WSA_RX1 INP0' RX1"
++		cset "name='WSA_COMP1 Switch' 0"
++		cset "name='WSA_COMP2 Switch' 0"
++		cset "name='SpkrLeft COMP Switch' 0"
++		cset "name='SpkrLeft BOOST Switch' 1"
++		cset "name='SpkrLeft DAC Switch' 1"
++		cset "name='SpkrLeft PBR Switch' 0"
++		cset "name='SpkrLeft VISENSE Switch' 0"
++		cset "name='SpkrLeft WSA MODE' 0"
++		cset "name='SpkrLeft PA Volume' 17"
++		cset "name='SpkrRight COMP Switch' 0"
++		cset "name='SpkrRight BOOST Switch' 1"
++		cset "name='SpkrRight DAC Switch' 1"
++		cset "name='SpkrRight PBR Switch' 0"
++		cset "name='SpkrRight VISENSE Switch' 0"
++		cset "name='SpkrRight WSA MODE' 0"
++		cset "name='SpkrRight PA Volume' 17"
++	]
++
++	DisableSequence [
++		cset "name='SpkrLeft COMP Switch' 0"
++		cset "name='SpkrLeft BOOST Switch' 0"
++		cset "name='SpkrLeft DAC Switch' 0"
++		cset "name='SpkrLeft PBR Switch' 0"
++		cset "name='SpkrLeft VISENSE Switch' 0"
++		cset "name='SpkrRight COMP Switch' 0"
++		cset "name='SpkrRight BOOST Switch' 0"
++		cset "name='SpkrRight DAC Switch' 0"
++		cset "name='SpkrRight PBR Switch' 0"
++		cset "name='SpkrRight VISENSE Switch' 0"
++	]
 +
 +	Value {
 +		PlaybackChannels 2
 +		PlaybackPriority 100
 +		PlaybackPCM "hw:${CardId},1"
 +		PlaybackMixer "default:${CardId}"
-+                PlaybackMixerElem "Speakers"
++		PlaybackMixerElem "Speakers"
 +	}
 +}
 +
