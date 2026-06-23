@@ -385,31 +385,56 @@ set +e
         fi
       ;;
       (${FUNCTION_POWER_PRESSED_EVENT})
-        ${DEBUG} && log $0 "${FUNCTION_POWER_PRESSED_EVENT}: Pressed"
-        POWER_PRESS_TIME=$(date +%s%N)
-        # Background process: vibrate after 250ms if still holding
-        (usleep 250000; if [ -f /tmp/.power_holding ]; then /usr/bin/rumble; fi) &
-        touch /tmp/.power_holding
+        # Wake-on-press while fake-suspended; bypass haptic/hold logic
+        if [ -f /var/run/power-fake-suspend-active.flag ]; then
+          ${DEBUG} && log $0 "Power pressed while suspended - waking"
+          touch /var/run/rocknix-fake-suspend.wake
+          POWER_PRESS_TIME=""
+        else
+          ${DEBUG} && log $0 "${FUNCTION_POWER_PRESSED_EVENT}: Pressed"
+          POWER_PRESS_TIME=$(date +%s%N)
+          # Background process: vibrate after 250ms if still holding
+          (usleep 250000; if [ -f /tmp/.power_holding ]; then /usr/bin/rumble; fi) &
+          touch /tmp/.power_holding
+        fi
       ;;
       (${FUNCTION_POWER_RELEASED_EVENT})
         rm -f /tmp/.power_holding
-        if [ -n "${POWER_PRESS_TIME}" ]; then
+        # If we just woke from fake-suspend, ignore the release
+        if [ -f /var/run/power-fake-suspend-active.flag ]; then
+          ${DEBUG} && log $0 "Power released during wake - ignoring"
+        elif [ -n "${POWER_PRESS_TIME}" ]; then
           POWER_RELEASE_TIME=$(date +%s%N)
           POWER_HOLD_MS=$(( (POWER_RELEASE_TIME - POWER_PRESS_TIME) / 1000000 ))
           ${DEBUG} && log $0 "Power held for ${POWER_HOLD_MS}ms"
           if [ ${POWER_HOLD_MS} -ge 250 ]; then
-            /usr/bin/rocknix-fake-suspend power &
+            # Try Steam URI first; fall back to systemctl suspend (fires drop-in)
+            STEAM_DIR="/storage/.local/share/Steam/steamrtarm64"
+            if [ -x "${STEAM_DIR}/steam" ]; then
+              LD_LIBRARY_PATH="/storage/.local/share/Steam/lib/aarch64-linux-gnu/" "${STEAM_DIR}/steam" -ifrunning steam://shortpowerpress >/dev/null 2>&1 || systemctl suspend &
+            else
+              systemctl suspend &
+            fi
           fi
           POWER_PRESS_TIME=""
         fi
       ;;
       (${FUNCTION_LID_CLOSE_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_CLOSE_EVENT}: Close"
-        /usr/bin/rocknix-fake-suspend lid close &
+        # Route lid close through Steam; fall back to systemctl suspend
+        STEAM_DIR="/storage/.local/share/Steam/steamrtarm64"
+        if [ -x "${STEAM_DIR}/steam" ]; then
+          LD_LIBRARY_PATH="/storage/.local/share/Steam/lib/aarch64-linux-gnu/" "${STEAM_DIR}/steam" -ifrunning steam://shortpowerpress >/dev/null 2>&1 || systemctl suspend &
+        else
+          systemctl suspend &
+        fi
       ;;
       (${FUNCTION_LID_OPEN_EVENT})
         ${DEBUG} && log $0 "${FUNCTION_LID_OPEN_EVENT}: Open"
-        /usr/bin/rocknix-fake-suspend lid open &
+        # Wake from fake-suspend on lid open
+        if [ -f /var/run/power-fake-suspend-active.flag ]; then
+          touch /var/run/rocknix-fake-suspend.wake
+        fi
       ;;
     esac
 

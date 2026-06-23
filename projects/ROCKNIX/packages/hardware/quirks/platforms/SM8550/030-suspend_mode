@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright (C) 2023 JELOS (https://github.com/JustEnoughLinuxOS)
 
-### Sleep is currently broken, so we'll disable it.
+### Real suspend hangs SM8550; systemd-suspend.service drop-in handles fake-suspend.
+### logind must allow suspend so systemctl suspend flows through to the drop-in.
 
-/usr/bin/suspendmode off
-
-### Ignore power button presses for now, until we can finish up fixing sleep.
+### Ignore power button presses — input_sense owns the button.
 cat <<EOF >~/.config/logind.conf.d/login.conf
 [Login]
 HandlePowerKey=ignore

@@ -294,6 +294,72 @@ do_resume_actions() {
   enable_leds
 }
 
+# Slim suspend actions for systemd-suspend sleep mode (Steam handles audio/fps/input)
+do_suspend_actions_slim() {
+  # Cap CPU max freq (low power but responsive for wake)
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    cat "$policy/scaling_max_freq" > "$policy/scaling_max_freq.save" 2>/dev/null
+    echo 441600 > "$policy/scaling_max_freq" 2>/dev/null
+  done
+
+  # Turn off display
+  display_off
+
+  # CPU core parking (if enabled)
+  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && park_cores
+
+  # Disable LEDs
+  disable_leds
+}
+
+# Slim resume actions for systemd-suspend sleep mode
+do_resume_actions_slim() {
+  # Restore CPU max freq
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    if [ -f "$policy/scaling_max_freq.save" ]; then
+      cat "$policy/scaling_max_freq.save" > "$policy/scaling_max_freq" 2>/dev/null
+      rm -f "$policy/scaling_max_freq.save"
+    fi
+  done
+
+  # Undo CPU core parking (if enabled)
+  [[ "${ENABLE_CORE_PARKING}" == "1" ]] && unpark_cores
+
+  # Turn on display
+  display_on
+
+  # Restore LEDs
+  enable_leds
+}
+
+# Poll for wake flag file; blocks until flag appears
+wait_for_wake() {
+  ${DEBUG} && log $0 "Waiting for wake flag"
+  while [ ! -f "${WAKE_FLAG_FILE}" ]; do
+    usleep 100000
+  done
+  rm -f "${WAKE_FLAG_FILE}"
+  ${DEBUG} && log $0 "Wake flag received"
+}
+
+# Background timed-shutdown task with charger/HDMI guards
+start_timed_shutdown() {
+  local DELAY=${SHUTDOWN_DELAY}
+  ${DEBUG} && log $0 "Timed shutdown (${DELAY} seconds) ..."
+  sleep ${DELAY}
+
+  if [ ! -f "${POWER_SUSPEND_ACTIVE_FLAG_FILE}" ]; then
+    ${DEBUG} && log $0 "Timed shutdown: no longer suspended, aborting"
+    return 0
+  fi
+
+  check_hdmi_connected && { ${DEBUG} && log $0 "HDMI connected, not shutting down"; return 0; }
+  check_charging && { ${DEBUG} && log $0 "Charging, not shutting down"; return 0; }
+
+  unmute_audio
+  shutdown now
+}
+
 do_shutdown() {
   # Check if HDMI has been connected while suspended
   check_hdmi_connected
@@ -393,6 +459,9 @@ resume() {
 }
 
 # Main logic
+# Sleep mode bypasses hardware-suspend and fake-suspend guards (invoked by systemd-suspend.service)
+if [[ "${1:-}" != "sleep" ]]; then
+
 # Only do something when hardware suspend is disabled
 check_hardware_suspend_enabled
 HW_SUSPEND_ENABLED=$?
@@ -410,6 +479,8 @@ if [[ $FAKE_SUSPEND_ENABLED != "1" ]]; then
   ${DEBUG} && log $0 "Fake suspend disabled, exiting"
   exit 0
 fi
+
+fi # end sleep bypass
 
 # Timed shutdown after suspend
 TIMED_SHUTDOWN_ENABLED="$(get_setting system.suspend.enable_timed_shutdown)"
@@ -437,6 +508,7 @@ DELAY_FLAG_FILE_PATTERN="/var/run/shutdown-delay.flag"
 DELAY_FLAG_FILE="${DELAY_FLAG_FILE_PATTERN}.${PID}"
 POWER_SUSPEND_ACTIVE_FLAG_FILE="/var/run/power-fake-suspend-active.flag"
 LID_CLOSED_FLAG_FILE="/var/run/lid-closed.flag"
+WAKE_FLAG_FILE="/var/run/rocknix-fake-suspend.wake"
 
 # Process to kill
 TO_KILL="rocknix-fake-suspend"
@@ -463,11 +535,30 @@ while IFS= read -r line; do
   BL_POWER_DEVICES+=("$line")
 done < <(find /sys/class/backlight/*/ -name bl_power 2>/dev/null)
 
-# Source = power / lid
+# Source = power / lid / sleep
 SOURCE=$1
 
 # Action = open / close
 ACTION=$2
+
+# systemd-suspend.service drop-in mode: blocks until wake, then returns
+if [[ "${SOURCE}" = "sleep" ]]; then
+  ${DEBUG} && log $0 "Sleep mode (systemd-suspend.service)"
+  [ -f "${POWER_SUSPEND_ACTIVE_FLAG_FILE}" ] && exit 0
+  check_hdmi_connected && exit 0
+  rm -f "${WAKE_FLAG_FILE}"
+  touch "${POWER_SUSPEND_ACTIVE_FLAG_FILE}"
+  do_suspend_actions_slim
+  if [[ "${TIMED_SHUTDOWN_ENABLED}" == "1" ]]; then
+    start_timed_shutdown &
+    TIMER_PID=$!
+  fi
+  wait_for_wake
+  [[ -n "${TIMER_PID:-}" ]] && kill "${TIMER_PID}" 2>/dev/null || true
+  do_resume_actions_slim
+  rm -f "${POWER_SUSPEND_ACTIVE_FLAG_FILE}"
+  exit 0
+fi
 
 # Check if HDMI is connected
 check_hdmi_connected
